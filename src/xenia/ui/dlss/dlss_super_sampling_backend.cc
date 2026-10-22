@@ -293,16 +293,37 @@ BackendResult DLSSSuperSamplingBackend::Initialize(
     ID3D12GraphicsCommandList* command_list, uint32_t input_width,
     uint32_t input_height, uint32_t output_width, uint32_t output_height) {
   if (!device_ || !command_list) {
+    if (!init_early_failure_logged_) {
+      XELOGE("DLSS SR: Initialize called with a null device or command_list; "
+             "cannot create the SDK session. Returning kInputContractFailed.");
+      init_early_failure_logged_ = true;
+    }
     return BackendResult::kInputContractFailed;
   }
 
   // 1. Capability check (CPU side, before any command is recorded).
   Microsoft::WRL::ComPtr<IDXGIDevice1> dxgi_device;
-  if (FAILED(device_->QueryInterface(IID_PPV_ARGS(&dxgi_device)))) {
+  const HRESULT query_hr = device_->QueryInterface(IID_PPV_ARGS(&dxgi_device));
+  if (FAILED(query_hr)) {
+    if (!init_early_failure_logged_) {
+      XELOGE("DLSS SR: the D3D12 device does not expose IDXGIDevice1 "
+             "(QueryInterface failed, 0x{:08X}); cannot run the DLSS "
+             "capability check. Returning kInitFailed.",
+             static_cast<uint32_t>(query_hr));
+      init_early_failure_logged_ = true;
+    }
     return BackendResult::kInitFailed;
   }
   Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
-  if (FAILED(dxgi_device->GetAdapter(adapter.GetAddressOf()))) {
+  const HRESULT adapter_hr = dxgi_device->GetAdapter(adapter.GetAddressOf());
+  if (FAILED(adapter_hr)) {
+    if (!init_early_failure_logged_) {
+      XELOGE("DLSS SR: failed to query the DXGI adapter from the device "
+             "(GetAdapter failed, 0x{:08X}); cannot run the DLSS capability "
+             "check. Returning kInitFailed.",
+             static_cast<uint32_t>(adapter_hr));
+      init_early_failure_logged_ = true;
+    }
     return BackendResult::kInitFailed;
   }
   // Build the PathList from the runtime directories. The SDK does not search
@@ -315,6 +336,12 @@ BackendResult DLSSSuperSamplingBackend::Initialize(
   }
   const uint32_t path_list_length = static_cast<uint32_t>(path_list.size());
   if (!path_list_length) {
+    if (!init_early_failure_logged_) {
+      XELOGE("DLSS SR: no runtime directories were provided (the runtime path "
+             "list is empty); the NGX runtime DLLs cannot be located. "
+             "Returning kInitFailed.");
+      init_early_failure_logged_ = true;
+    }
     return BackendResult::kInitFailed;
   }
   NVSDK_NGX_FeatureCommonInfo discovery_common{};

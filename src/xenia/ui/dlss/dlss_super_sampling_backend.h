@@ -146,6 +146,12 @@ class DLSSSuperSamplingBackend final : public IDLSSSuperSamplingBackend {
   // the presenter separately logs the fallback this frame.
   bool contract_failure_logged_ = false;
 
+  // True after the first early Initialize failure (null device/command_list,
+  // QueryInterface, GetAdapter, or empty runtime path list) has been logged.
+  // These failures leave state_ as kNotInitialized, so Initialize is retried
+  // every frame; the failure is logged only once to avoid per-frame spam.
+  bool init_early_failure_logged_ = false;
+
   // SDK-owned (allocated by the SDK, released via the SDK).
   NVSDK_NGX_Handle* feature_handle_ = nullptr;
   NVSDK_NGX_Parameter* parameter_block_ = nullptr;
