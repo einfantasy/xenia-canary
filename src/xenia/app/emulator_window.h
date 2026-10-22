@@ -16,6 +16,7 @@
 #include "xenia/app/profile_dialogs.h"
 #include "xenia/emulator.h"
 #include "xenia/gpu/command_processor.h"
+#include "xenia/ui/guest_output_enhancement.h"
 #include "xenia/ui/imgui_dialog.h"
 #include "xenia/ui/imgui_drawer.h"
 #include "xenia/ui/immediate_drawer.h"
@@ -259,6 +260,8 @@ class EmulatorWindow {
   GetGuestOutputPaintEffectForCvarValue(const std::string& cvar_value);
   static ui::Presenter::GuestOutputPaintConfig
   GetGuestOutputPaintConfigForCvars();
+  static ui::GuestOutputEnhancementConfig
+  GetGuestOutputEnhancementConfigForCvars();
   void ApplyDisplayConfigForCvars();
 
   void OnKeyDown(ui::KeyEvent& e);

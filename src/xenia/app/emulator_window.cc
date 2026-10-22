@@ -40,8 +40,12 @@
 #include "xenia/kernel/xam/xam_module.h"
 #include "xenia/kernel/xam/xam_state.h"
 #include "xenia/kernel/xconfig.h"
+#if XE_PLATFORM_WIN32
+#include "xenia/ui/d3d12/d3d12_presenter.h"
+#endif
 #include "xenia/ui/file_picker.h"
 #include "xenia/ui/graphics_provider.h"
+#include "xenia/ui/guest_output_enhancement.h"
 #include "xenia/ui/imgui_dialog.h"
 #include "xenia/ui/imgui_drawer.h"
 #include "xenia/ui/imgui_host_notification.h"
@@ -133,6 +137,22 @@ DEFINE_double(
     "Sharpness reduction for AMD FidelityFX Super Resolution 1.0 (FSR), in "
     "stops.\n"
     "Lower is sharper.",
+    "Display");
+DEFINE_bool(
+    dlss_enabled, false,
+    "Master switch for the NVIDIA DLSS enhancement path (D3D12 presenter "
+    "only). When false, no DLSS backend is requested, no NVIDIA runtime DLL "
+    "is loaded, and no extra GPU steps are performed.\n"
+    "This is an independent enhancement path, not mutually exclusive with "
+    "FSR/CAS resampling.",
+    "Display");
+DEFINE_bool(
+    dlss_sr_enabled, false,
+    "DLSS Super Resolution sub-switch. Only effective when dlss_enabled is "
+    "true. When enabled together with the master switch, the D3D12 presenter "
+    "lazily creates the DLSS SR backend on the first frame; if the NVIDIA "
+    "runtime is missing or initialization fails, it deterministically falls "
+    "back to the original render path.",
     "Display");
 // Dithering to 8bpc is enabled by default since the effect is minor, only
 // effects what can't be shown normally by host displays, and nothing is changed
@@ -410,11 +430,35 @@ void EmulatorWindow::DisplayConfigDialog::OnDraw(ImGuiIO& io) {
     ui::Presenter::GuestOutputPaintConfig new_presenter_config =
         current_presenter_config;
 
+#if XE_PLATFORM_WIN32
+    // The DLSS enhancement backend exists only on the D3D12 presenter. Read
+    // the current enhancement config once (read-modify-write pattern, like the
+    // paint config) so the checkboxes below can modify it.
+    auto* d3d12_presenter =
+        dynamic_cast<ui::d3d12::D3D12Presenter*>(presenter);
+    ui::GuestOutputEnhancementConfig new_enhancement_config;
+    if (d3d12_presenter) {
+      new_enhancement_config =
+          d3d12_presenter->GetGuestOutputEnhancementConfigFromUIThread();
+    }
+#endif
+
     if (ImGui::TreeNodeEx(
             "Resampling and sharpening",
             ImGuiTreeNodeFlags_Framed | ImGuiTreeNodeFlags_DefaultOpen)) {
-      // Filtering effect.
+      // Resampling effect selection. The options are mutually exclusive: each
+      // is a complete resampling / super-sampling method. NVIDIA DLSS (D3D12
+      // presenter only) is a fourth radio option; when selected it forces the
+      // FSR/CAS paint effect to bilinear so the DLSS output is not double-
+      // resampled by FSR/CAS.
       int new_effect_index = int(new_presenter_config.GetEffect());
+#if XE_PLATFORM_WIN32
+      // If the DLSS master is on, DLSS is the active resampling method. Value 3
+      // is outside the Effect enum range (0-2) and marks the DLSS radio.
+      if (d3d12_presenter && new_enhancement_config.master_enabled) {
+        new_effect_index = 3;
+      }
+#endif
       ImGui::RadioButton(
           "None / Bilinear", &new_effect_index,
           int(ui::Presenter::GuestOutputPaintConfig::Effect::kBilinear));
@@ -425,8 +469,37 @@ void EmulatorWindow::DisplayConfigDialog::OnDraw(ImGuiIO& io) {
       ImGui::RadioButton(
           "AMD FidelityFX Super Resolution 1.0 (FSR)", &new_effect_index,
           int(ui::Presenter::GuestOutputPaintConfig::Effect::kFsr));
+#if XE_PLATFORM_WIN32
+      if (d3d12_presenter) {
+        ImGui::RadioButton("NVIDIA DLSS", &new_effect_index, 3);
+      }
+#endif
+      // Sync the configs from the radio selection. DLSS (index 3) enables the
+      // DLSS master and forces the paint effect to bilinear (no double
+      // resampling); any other option disables the DLSS master and sets the
+      // paint effect accordingly.
+#if XE_PLATFORM_WIN32
+      if (d3d12_presenter) {
+        new_enhancement_config.master_enabled = (new_effect_index == 3);
+        if (new_effect_index == 3) {
+          new_effect_index =
+              int(ui::Presenter::GuestOutputPaintConfig::Effect::kBilinear);
+        }
+      }
+#endif
       new_presenter_config.SetEffect(
           ui::Presenter::GuestOutputPaintConfig::Effect(new_effect_index));
+#if XE_PLATFORM_WIN32
+      // The SR sub-switch is only drawn (and only changeable) while the DLSS
+      // radio is selected (master on). When the master is off, the sub-switch
+      // keeps its value and cannot trigger backend creation (effective SR
+      // request = master && sub).
+      if (d3d12_presenter && new_enhancement_config.master_enabled) {
+        bool new_dlss_sr = new_enhancement_config.super_sampling_enabled;
+        ImGui::Checkbox("Super Resolution", &new_dlss_sr);
+        new_enhancement_config.super_sampling_enabled = new_dlss_sr;
+      }
+#endif
 
       // effect_description must be one complete, but short enough, sentence per
       // line, as TextWrapped doesn't work correctly in auto-resizing windows
@@ -556,6 +629,30 @@ void EmulatorWindow::DisplayConfigDialog::OnDraw(ImGuiIO& io) {
     }
 
     presenter->SetGuestOutputPaintConfigFromUIThread(new_presenter_config);
+
+#if XE_PLATFORM_WIN32
+    // Write the DLSS enhancement config to the D3D12 presenter and override its
+    // cvars to persist them at exit.
+    if (d3d12_presenter) {
+      d3d12_presenter->SetGuestOutputEnhancementConfigFromUIThread(
+          new_enhancement_config);
+      ui::GuestOutputEnhancementConfig cvars_enhancement_config =
+          GetGuestOutputEnhancementConfigForCvars();
+      if (cvars_enhancement_config.master_enabled !=
+          new_enhancement_config.master_enabled) {
+        OVERRIDE_bool(dlss_enabled, new_enhancement_config.master_enabled);
+      }
+      // Only persist the SR sub-switch when the master is on (the sub-checkbox
+      // is only drawn and changeable in that case). When the master is off the
+      // sub-switch value is retained as-is.
+      if (new_enhancement_config.master_enabled &&
+          cvars_enhancement_config.super_sampling_enabled !=
+              new_enhancement_config.super_sampling_enabled) {
+        OVERRIDE_bool(dlss_sr_enabled,
+                      new_enhancement_config.super_sampling_enabled);
+      }
+    }
+#endif
 
     // Override the values in the cvars to save them to the config at exit if
     // the user has set them to anything new.
@@ -1019,6 +1116,16 @@ EmulatorWindow::GetGuestOutputPaintConfigForCvars() {
   return paint_config;
 }
 
+ui::GuestOutputEnhancementConfig
+EmulatorWindow::GetGuestOutputEnhancementConfigForCvars() {
+  ui::GuestOutputEnhancementConfig enhancement_config;
+  enhancement_config.master_enabled = cvars::dlss_enabled;
+  enhancement_config.super_sampling_enabled = cvars::dlss_sr_enabled;
+  // NVOF / Frame Generation / experimental neural rendering sub-switches are
+  // not exposed in the UI yet (Phase 2+); keep them at their default-off.
+  return enhancement_config;
+}
+
 void EmulatorWindow::ApplyDisplayConfigForCvars() {
   gpu::GraphicsSystem* graphics_system = emulator_->graphics_system();
   if (!graphics_system) {
@@ -1036,6 +1143,14 @@ void EmulatorWindow::ApplyDisplayConfigForCvars() {
   if (presenter) {
     presenter->SetGuestOutputPaintConfigFromUIThread(
         GetGuestOutputPaintConfigForCvars());
+#if XE_PLATFORM_WIN32
+    // The DLSS enhancement config is only available on the D3D12 presenter.
+    if (auto* d3d12_presenter =
+            dynamic_cast<ui::d3d12::D3D12Presenter*>(presenter)) {
+      d3d12_presenter->SetGuestOutputEnhancementConfigFromUIThread(
+          GetGuestOutputEnhancementConfigForCvars());
+    }
+#endif
   }
 }
 
