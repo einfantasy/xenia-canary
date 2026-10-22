@@ -140,6 +140,12 @@ class DLSSSuperSamplingBackend final : public IDLSSSuperSamplingBackend {
   // before the next evaluate. Initially false (the output starts in UAV).
   bool output_in_pixel_shader_resource_ = false;
 
+  // True after the first input-contract failure has been logged. The early
+  // contract checks (null pointer / zero size / 1:1) fire every frame, so the
+  // failure is logged only once to avoid per-frame spam. Diagnostic only -
+  // the presenter separately logs the fallback this frame.
+  bool contract_failure_logged_ = false;
+
   // SDK-owned (allocated by the SDK, released via the SDK).
   NVSDK_NGX_Handle* feature_handle_ = nullptr;
   NVSDK_NGX_Parameter* parameter_block_ = nullptr;

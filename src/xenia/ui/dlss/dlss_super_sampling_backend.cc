@@ -448,17 +448,34 @@ BackendResult DLSSSuperSamplingBackend::TryProcess(
     return BackendResult::kUnavailable;
   }
   if (!command_list || !guest_output) {
+    if (!contract_failure_logged_) {
+      XELOGW("DLSS SR: input contract failed: null command_list or "
+             "guest_output.");
+      contract_failure_logged_ = true;
+    }
     return BackendResult::kInputContractFailed;
   }
   const uint32_t input_width = guest_output_properties.frontbuffer_width;
   const uint32_t input_height = guest_output_properties.frontbuffer_height;
   // Input contract: all sizes must be non-zero.
   if (!input_width || !input_height || !output_width || !output_height) {
+    if (!contract_failure_logged_) {
+      XELOGW("DLSS SR: input contract failed: zero size (input={}x{}, "
+             "output={}x{}).",
+             input_width, input_height, output_width, output_height);
+      contract_failure_logged_ = true;
+    }
     return BackendResult::kInputContractFailed;
   }
   // 1:1 bypass: the caller (presenter) should skip the backend in this case,
   // but guard here as well.
   if (input_width == output_width && input_height == output_height) {
+    if (!contract_failure_logged_) {
+      XELOGW("DLSS SR: input contract failed: 1:1 (input={}x{} == output={}x{}); "
+             "the presenter should have bypassed the backend.",
+             input_width, input_height, output_width, output_height);
+      contract_failure_logged_ = true;
+    }
     return BackendResult::kInputContractFailed;
   }
 
