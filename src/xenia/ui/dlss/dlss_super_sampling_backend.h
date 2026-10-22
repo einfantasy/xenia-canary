@@ -33,6 +33,7 @@
 struct ID3D12Device;
 struct ID3D12GraphicsCommandList;
 struct ID3D12Resource;
+struct IDXGIAdapter1;
 struct NVSDK_NGX_Handle;
 struct NVSDK_NGX_Parameter;
 
@@ -81,7 +82,12 @@ class DLSSSuperSamplingBackend final : public IDLSSSuperSamplingBackend {
   // DLLs (nvngxruntime.dll, nvngx_dlss.dll). They are passed to the SDK via
   // NVSDK_NGX_FeatureCommonInfo.PathListInfo.Path. None are used until the
   // backend is actually initialized (lazy).
+  // `adapter` is the DXGI adapter the provider used to create `device`,
+  // borrowed (owned by the provider, released in its destructor). It is used
+  // only for the DLSS capability check (GetFeatureRequirements). It must outlive
+  // the backend.
   DLSSSuperSamplingBackend(ID3D12Device* device,
+                           IDXGIAdapter1* adapter,
                            std::vector<std::wstring> runtime_dirs);
   ~DLSSSuperSamplingBackend() override;
 
@@ -123,6 +129,9 @@ class DLSSSuperSamplingBackend final : public IDLSSSuperSamplingBackend {
   void ReleaseFeature();
 
   ID3D12Device* device_;
+  // Borrowed: the provider owns this and releases it in its destructor. The
+  // backend only reads it during Initialize(); it never Releases it.
+  IDXGIAdapter1* adapter_;
   std::vector<std::wstring> runtime_dirs_;
 
   State state_ = State::kNotInitialized;

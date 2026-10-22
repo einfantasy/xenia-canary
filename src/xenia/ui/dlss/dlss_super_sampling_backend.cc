@@ -232,8 +232,11 @@ BackendResult InitFailureToBackendResult(NVSDK_NGX_Result result) {
 }  // namespace
 
 DLSSSuperSamplingBackend::DLSSSuperSamplingBackend(
-    ID3D12Device* device, std::vector<std::wstring> runtime_dirs)
-    : device_(device), runtime_dirs_(std::move(runtime_dirs)) {}
+    ID3D12Device* device, IDXGIAdapter1* adapter,
+    std::vector<std::wstring> runtime_dirs)
+    : device_(device),
+      adapter_(adapter),
+      runtime_dirs_(std::move(runtime_dirs)) {}
 
 DLSSSuperSamplingBackend::~DLSSSuperSamplingBackend() { Shutdown(); }
 
@@ -265,7 +268,14 @@ void DLSSSuperSamplingBackend::Shutdown() {
          input_width_, input_height_, output_width_, output_height_);
   ReleaseFeature();
   uint32_t seh_code = 0;
-  CallShutdown1(device_, seh_code);
+  NVSDK_NGX_Result shutdown_result = CallShutdown1(device_, seh_code);
+  if (shutdown_result != NVSDK_NGX_Result_Success) {
+    XELOGW("DLSS SR: SDK Shutdown1 failed (result={}, seh=0x{:08X}); the SDK "
+           "session is discarded anyway.",
+           static_cast<int>(shutdown_result), seh_code);
+  } else {
+    XELOGI("DLSS SR: SDK Shutdown1 succeeded.");
+  }
   g_ngx_device = nullptr;
   output_texture_.Reset();
   output_in_pixel_shader_resource_ = false;
@@ -279,12 +289,28 @@ void DLSSSuperSamplingBackend::Shutdown() {
 void DLSSSuperSamplingBackend::ReleaseFeature() {
   if (feature_handle_) {
     uint32_t seh_code = 0;
-    CallReleaseFeature(feature_handle_, seh_code);
+    NVSDK_NGX_Result release_result =
+        CallReleaseFeature(feature_handle_, seh_code);
+    if (release_result != NVSDK_NGX_Result_Success) {
+      XELOGW("DLSS SR: ReleaseFeature failed (result={}, seh=0x{:08X}); the "
+             "SDK handle is discarded anyway.",
+             static_cast<int>(release_result), seh_code);
+    } else {
+      XELOGD("DLSS SR: ReleaseFeature succeeded.");
+    }
     feature_handle_ = nullptr;
   }
   if (parameter_block_) {
     uint32_t seh_code = 0;
-    CallDestroyParameters(parameter_block_, seh_code);
+    NVSDK_NGX_Result destroy_result =
+        CallDestroyParameters(parameter_block_, seh_code);
+    if (destroy_result != NVSDK_NGX_Result_Success) {
+      XELOGW("DLSS SR: DestroyParameters failed (result={}, seh=0x{:08X}); the "
+             "parameter block is discarded anyway.",
+             static_cast<int>(destroy_result), seh_code);
+    } else {
+      XELOGD("DLSS SR: DestroyParameters succeeded.");
+    }
     parameter_block_ = nullptr;
   }
 }
@@ -301,27 +327,34 @@ BackendResult DLSSSuperSamplingBackend::Initialize(
     return BackendResult::kInputContractFailed;
   }
 
-  // 1. Capability check (CPU side, before any command is recorded).
-  Microsoft::WRL::ComPtr<IDXGIDevice1> dxgi_device;
-  const HRESULT query_hr = device_->QueryInterface(IID_PPV_ARGS(&dxgi_device));
-  if (FAILED(query_hr)) {
-    if (!init_early_failure_logged_) {
-      XELOGE("DLSS SR: the D3D12 device does not expose IDXGIDevice1 "
-             "(QueryInterface failed, 0x{:08X}); cannot run the DLSS "
-             "capability check. Returning kInitFailed.",
-             static_cast<uint32_t>(query_hr));
-      init_early_failure_logged_ = true;
-    }
-    return BackendResult::kInitFailed;
+  // Diagnostic (logging only): log the device's adapter LUID so that on the
+  // test machine we can confirm the device sits on a real physical adapter
+  // (the RTX 4090) even when the capability check below fails. This is a
+  // standard D3D12 QI (no SDK involvement, no state change) whose result feeds
+  // only a log line. It distinguishes a structural QI failure (the device is a
+  // valid NVIDIA device but ID3D12Device simply does not expose IDXGIDevice1)
+  // from an environmental one (a real adapter is missing).
+  Microsoft::WRL::ComPtr<ID3D12Device3> device3;
+  bool luid_available = false;
+  LUID adapter_luid{};
+  if (SUCCEEDED(device_->QueryInterface(IID_PPV_ARGS(&device3)))) {
+    adapter_luid = device3->GetAdapterLuid();
+    luid_available = true;
   }
-  Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
-  const HRESULT adapter_hr = dxgi_device->GetAdapter(adapter.GetAddressOf());
-  if (FAILED(adapter_hr)) {
+  XELOGD("DLSS SR: Initialize entry (state={}, input={}x{}, output={}x{}, "
+         "runtime_dirs={}, adapter_luid={:04X}:{:04X}).",
+         static_cast<int>(state_), input_width, input_height, output_width,
+         output_height, runtime_dirs_.size(),
+         luid_available ? adapter_luid.HighPart : 0,
+         luid_available ? adapter_luid.LowPart : 0);
+
+  // 1. Capability check (CPU side, before any command is recorded). The adapter
+  //    is the one the provider used to create device_; it is borrowed (owned by
+  //    the provider, released in its destructor), never released here.
+  if (!adapter_) {
     if (!init_early_failure_logged_) {
-      XELOGE("DLSS SR: failed to query the DXGI adapter from the device "
-             "(GetAdapter failed, 0x{:08X}); cannot run the DLSS capability "
-             "check. Returning kInitFailed.",
-             static_cast<uint32_t>(adapter_hr));
+      XELOGE("DLSS SR: no DXGI adapter was provided by the provider; cannot "
+             "run the DLSS capability check. Returning kInitFailed.");
       init_early_failure_logged_ = true;
     }
     return BackendResult::kInitFailed;
@@ -361,7 +394,7 @@ BackendResult DLSSSuperSamplingBackend::Initialize(
   NVSDK_NGX_FeatureRequirement requirement{};
   uint32_t seh_code = 0;
   NVSDK_NGX_Result requirement_result = CallGetFeatureRequirements(
-      adapter.Get(), &discovery, &requirement, seh_code);
+      adapter_, &discovery, &requirement, seh_code);
   if (requirement_result != NVSDK_NGX_Result_Success ||
       requirement.FeatureSupported != NVSDK_NGX_FeatureSupportResult_Supported) {
     // Capability check failed: the GPU / driver does not support DLSS SR.
@@ -373,8 +406,14 @@ BackendResult DLSSSuperSamplingBackend::Initialize(
     state_ = State::kUnavailable;
     return BackendResult::kUnavailable;
   }
+  XELOGD("DLSS SR: capability check passed (result={}, supported={}); the "
+         "GPU/driver/runtime supports DLSS SR. Proceeding with SDK init.",
+         static_cast<int>(requirement_result),
+         static_cast<int>(requirement.FeatureSupported));
 
   // 2. Initialize the SDK session (CPU side).
+  XELOGD("DLSS SR: SDK Init_with_ProjectID start (path_list_length={}).",
+         path_list_length);
   NVSDK_NGX_Result init_result = CallInitWithProjectId(
       "xenia-dlss-sr", L".", path_list.data(), path_list_length, device_,
       seh_code);
@@ -385,8 +424,10 @@ BackendResult DLSSSuperSamplingBackend::Initialize(
     return InitFailureToBackendResult(init_result);
   }
   g_ngx_device = device_;
+  XELOGD("DLSS SR: SDK Init succeeded.");
 
   // 3. Allocate the parameter block (CPU side).
+  XELOGD("DLSS SR: AllocateParameters start.");
   NVSDK_NGX_Result alloc_result = CallAllocateParameters(&parameter_block_,
                                                         seh_code);
   if (alloc_result != NVSDK_NGX_Result_Success || !parameter_block_) {
@@ -422,10 +463,17 @@ BackendResult DLSSSuperSamplingBackend::Initialize(
           &kDefaultHeapProperties, D3D12_HEAP_FLAG_NONE, &output_desc,
           D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
           IID_PPV_ARGS(&output_texture_)))) {
+    XELOGE("DLSS SR: CreateCommittedResource for the backend output texture "
+           "failed ({}x{}, R10G10B10A2_UNORM, ALLOW_UNORDERED_ACCESS). "
+           "Caching as unavailable.",
+           output_width, output_height);
     state_ = State::kUnavailable;
     return BackendResult::kInitFailed;
   }
   output_in_pixel_shader_resource_ = false;  // starts in UAV state.
+  XELOGD("DLSS SR: backend output texture created ({}x{}, R10G10B10A2_UNORM, "
+         "UAV state).",
+         output_width, output_height);
 
   // 5. Record CreateFeature into the command list (GPU command, first command
   //    group). IsHDR=0 (guest output is R10G10B10A2_UNORM perceived LDR),
@@ -440,6 +488,8 @@ BackendResult DLSSSuperSamplingBackend::Initialize(
   create_params.InFeatureCreateFlags =
       static_cast<int>(NVSDK_NGX_DLSS_Feature_Flags_AutoExposure);
   create_params.InEnableOutputSubrects = 0;
+  XELOGD("DLSS SR: CreateFeature start (input={}x{} -> output={}x{}).",
+         input_width, input_height, output_width, output_height);
   NVSDK_NGX_Result create_result = CallCreateDlss(command_list, &feature_handle_,
                                                  parameter_block_,
                                                  &create_params, seh_code);
