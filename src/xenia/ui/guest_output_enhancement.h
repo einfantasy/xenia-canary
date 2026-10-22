@@ -23,6 +23,14 @@
 
 #include "xenia/ui/presenter.h"
 
+// Forward declarations of the D3D12 types used by the backend interface.
+// The backend records its GPU commands (CreateFeature / EvaluateFeature and
+// the surrounding state-transition barriers) into the caller's command list,
+// and reads the guest output resource (borrowed, read-only). Keeping these as
+// forward-declared pointers avoids pulling the full d3d12.h into this header.
+struct ID3D12GraphicsCommandList;
+struct ID3D12Resource;
+
 namespace xe {
 namespace ui {
 
@@ -130,6 +138,24 @@ struct GuestOutputEnhancementConfig {
 // ---------------------------------------------------------------------------
 // IDLSSSuperSamplingBackend
 //
+// DlssSrFrameParams
+//
+// Per-frame parameters for the DLSS SR backend. These change per frame (the
+// jitter offset advances for temporal anti-aliasing; InReset is set on scene
+// changes) and are passed as call arguments to the backend's per-frame call,
+// NOT stored in a persistent config object. (See the architecture design,
+// section F1.)
+// ---------------------------------------------------------------------------
+struct DlssSrFrameParams {
+  // Jitter offset in input/render pixel space. Advances per frame.
+  float jitter_x = 0.0f;
+  float jitter_y = 0.0f;
+  // Set to true on a scene change; resets the backend's temporal history.
+  bool in_reset = false;
+};
+// ---------------------------------------------------------------------------
+// IDLSSSuperSamplingBackend
+//
 // The minimal DLSS SR backend interface. A real implementation (Milestone 3)
 // will own its own output textures and only borrow the guest output (read-only,
 // via SRV) - it never takes ownership of the guest output resource and never
@@ -149,10 +175,37 @@ class IDLSSSuperSamplingBackend {
 
   // Attempt to process one guest output frame. Returns a BackendResult: kSuccess,
   // or one of the specific failure reasons (kUnavailable, kInitFailed,
-  // kInputContractFailed, kSyncConditionFailed, kExecutionFailed, kOutputInvalid).
-  // The backend owns its own output and only borrows the guest output.
+  // kInputContractFailed, kSyncConditionFailed, kExecutionFailed,
+  // kOutputInvalid).
+  //
+  // The backend owns its own output texture and only borrows the guest output
+  // (read-only). It records its GPU work (the SDK CreateFeature /
+  // EvaluateFeature calls plus the surrounding state-transition barriers) into
+  // `command_list`. The command list is a recording buffer: it is only executed
+  // once at the end (ExecuteCommandLists). On failure the backend does NOT reset
+  // the command list itself - that is the presenter's responsibility (see the
+  // architecture design, section on command submission semantics).
+  //
+  // `guest_output` is the guest output resource to read (borrowed). Its size is
+  // given by `guest_output_properties.frontbuffer_width/height`. The backend
+  // output is written to a texture it owns, at `output_width` x `output_height`
+  // (the target resolution).
   virtual BackendResult TryProcess(
-      const Presenter::GuestOutputProperties& guest_output) = 0;
+      ID3D12GraphicsCommandList* command_list,
+      ID3D12Resource* guest_output,
+      uint32_t output_width,
+      uint32_t output_height,
+      const Presenter::GuestOutputProperties& guest_output_properties,
+      const DlssSrFrameParams& frame_params) = 0;
+
+  // The backend's owned output texture, valid after a successful TryProcess
+  // (the backend created it during initialization). The presenter uses these
+  // to create the SRV the first paint effect reads from. The default
+  // implementations return nullptr/0 so host-test stub backends need no
+  // overrides; the real DLSS backend overrides them.
+  virtual ID3D12Resource* OutputResource() const { return nullptr; }
+  virtual uint32_t OutputWidth() const { return 0; }
+  virtual uint32_t OutputHeight() const { return 0; }
 
   // Release backend-owned resources. The presenter never destroys backend
   // resources directly; this is the backend's responsibility.
@@ -193,7 +246,12 @@ void BuildOriginalPathFallbackFlow(Presenter::GuestOutputPaintFlow* flow,
 // ---------------------------------------------------------------------------
 BackendResult SelectOutputPath(const GuestOutputEnhancementConfig& config,
                                IDLSSSuperSamplingBackend* backend,
-                               const Presenter::GuestOutputProperties& guest_output,
+                               ID3D12GraphicsCommandList* command_list,
+                               ID3D12Resource* guest_output_resource,
+                               uint32_t output_width,
+                               uint32_t output_height,
+                               const Presenter::GuestOutputProperties& guest_output_properties,
+                               const DlssSrFrameParams& frame_params,
                                Presenter::GuestOutputPaintFlow* fallback_flow_out);
 
 }  // namespace ui

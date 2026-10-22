@@ -30,8 +30,18 @@ class StubBackend final : public IDLSSSuperSamplingBackend {
   }
 
   BackendResult TryProcess(
-      const Presenter::GuestOutputProperties& guest_output) override {
+      ID3D12GraphicsCommandList* command_list, ID3D12Resource* guest_output,
+      uint32_t output_width, uint32_t output_height,
+      const Presenter::GuestOutputProperties& guest_output_properties,
+      const DlssSrFrameParams& frame_params) override {
+    // The stub performs no real GPU work; it ignores the GPU parameters and
+    // returns the configured result to drive the path-selection logic.
+    (void)command_list;
     (void)guest_output;
+    (void)output_width;
+    (void)output_height;
+    (void)guest_output_properties;
+    (void)frame_params;
     return result_;
   }
 
@@ -76,7 +86,7 @@ TEST_CASE("No backend requested when default off", "[enhancement]") {
   StubBackend backend(BackendResult::kSuccess);
   auto props = MakeActiveProperties();
   Presenter::GuestOutputPaintFlow flow;
-  auto result = SelectOutputPath(config, &backend, props, &flow);
+  auto result = SelectOutputPath(config, &backend, nullptr, nullptr, 0, 0, props, DlssSrFrameParams{}, &flow);
   CHECK(result == BackendResult::kNotRequested);
 }
 
@@ -88,7 +98,7 @@ TEST_CASE("Backend unavailable selects original path", "[enhancement]") {
   StubBackend backend(BackendResult::kUnavailable);
   auto props = MakeActiveProperties();
   Presenter::GuestOutputPaintFlow flow;
-  auto result = SelectOutputPath(config, &backend, props, &flow);
+  auto result = SelectOutputPath(config, &backend, nullptr, nullptr, 0, 0, props, DlssSrFrameParams{}, &flow);
   CHECK(result == BackendResult::kUnavailable);
   CHECK(IsOriginalPathFallback(result));
   CHECK(flow.effect_count == 1);
@@ -103,7 +113,7 @@ TEST_CASE("Init failure selects original path", "[enhancement]") {
   StubBackend backend(BackendResult::kInitFailed);
   auto props = MakeActiveProperties();
   Presenter::GuestOutputPaintFlow flow;
-  auto result = SelectOutputPath(config, &backend, props, &flow);
+  auto result = SelectOutputPath(config, &backend, nullptr, nullptr, 0, 0, props, DlssSrFrameParams{}, &flow);
   CHECK(result == BackendResult::kInitFailed);
   CHECK(IsOriginalPathFallback(result));
   CHECK(flow.effect_count == 1);
@@ -118,7 +128,7 @@ TEST_CASE("Input contract failure selects original path", "[enhancement]") {
   StubBackend backend(BackendResult::kInputContractFailed);
   auto props = MakeActiveProperties();
   Presenter::GuestOutputPaintFlow flow;
-  auto result = SelectOutputPath(config, &backend, props, &flow);
+  auto result = SelectOutputPath(config, &backend, nullptr, nullptr, 0, 0, props, DlssSrFrameParams{}, &flow);
   CHECK(result == BackendResult::kInputContractFailed);
   CHECK(IsOriginalPathFallback(result));
   CHECK(flow.effect_count == 1);
@@ -133,7 +143,7 @@ TEST_CASE("Sync condition failure selects original path", "[enhancement]") {
   StubBackend backend(BackendResult::kSyncConditionFailed);
   auto props = MakeActiveProperties();
   Presenter::GuestOutputPaintFlow flow;
-  auto result = SelectOutputPath(config, &backend, props, &flow);
+  auto result = SelectOutputPath(config, &backend, nullptr, nullptr, 0, 0, props, DlssSrFrameParams{}, &flow);
   CHECK(result == BackendResult::kSyncConditionFailed);
   CHECK(IsOriginalPathFallback(result));
   CHECK(flow.effect_count == 1);
@@ -148,7 +158,7 @@ TEST_CASE("Execution failure selects original path", "[enhancement]") {
   StubBackend backend(BackendResult::kExecutionFailed);
   auto props = MakeActiveProperties();
   Presenter::GuestOutputPaintFlow flow;
-  auto result = SelectOutputPath(config, &backend, props, &flow);
+  auto result = SelectOutputPath(config, &backend, nullptr, nullptr, 0, 0, props, DlssSrFrameParams{}, &flow);
   CHECK(result == BackendResult::kExecutionFailed);
   CHECK(IsOriginalPathFallback(result));
   CHECK(flow.effect_count == 1);
@@ -163,7 +173,7 @@ TEST_CASE("Output validation failure selects original path", "[enhancement]") {
   StubBackend backend(BackendResult::kOutputInvalid);
   auto props = MakeActiveProperties();
   Presenter::GuestOutputPaintFlow flow;
-  auto result = SelectOutputPath(config, &backend, props, &flow);
+  auto result = SelectOutputPath(config, &backend, nullptr, nullptr, 0, 0, props, DlssSrFrameParams{}, &flow);
   CHECK(result == BackendResult::kOutputInvalid);
   CHECK(IsOriginalPathFallback(result));
   CHECK(flow.effect_count == 1);
@@ -207,7 +217,7 @@ TEST_CASE("effect_count 0 not used for backend failure fallback",
   StubBackend backend(BackendResult::kExecutionFailed);
   auto props = MakeActiveProperties();
   Presenter::GuestOutputPaintFlow flow;
-  auto result = SelectOutputPath(config, &backend, props, &flow);
+  auto result = SelectOutputPath(config, &backend, nullptr, nullptr, 0, 0, props, DlssSrFrameParams{}, &flow);
   CHECK(IsOriginalPathFallback(result));
   CHECK(flow.effect_count == 1);  // NEVER 0
 }
@@ -245,7 +255,7 @@ TEST_CASE("Other sub-features off do not affect SR", "[enhancement]") {
   StubBackend backend(BackendResult::kSuccess);
   auto props = MakeActiveProperties();
   Presenter::GuestOutputPaintFlow flow;
-  auto result = SelectOutputPath(config, &backend, props, &flow);
+  auto result = SelectOutputPath(config, &backend, nullptr, nullptr, 0, 0, props, DlssSrFrameParams{}, &flow);
   CHECK(result == BackendResult::kSuccess);
 }
 
