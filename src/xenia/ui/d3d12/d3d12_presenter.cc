@@ -825,8 +825,8 @@ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(
             if (backend_result == BackendResult::kSuccess) {
               dlss_sr_used = true;
               if (backend_just_created) {
-                XELOGI("DLSS SR: backend activated; the paint path now reads "
-                       "the DLSS output (input=%ux%u -> output=%ux%u).",
+              XELOGI("DLSS SR: backend activated; the paint path now reads "
+                     "the DLSS output (input={}x{} -> output={}x{}).",
                        guest_width, guest_height,
                        paint_context_.swap_chain_width,
                        paint_context_.swap_chain_height);
@@ -857,7 +857,7 @@ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(
               // original path is re-recorded by the effect loop below. The guest
               // output is still in PIXEL_SHADER_RESOURCE (nothing was executed),
               // so the original path is safe.
-              XELOGW("DLSS SR: SelectOutputPath returned %s; falling back to "
+              XELOGW("DLSS SR: SelectOutputPath returned {}; falling back to "
                      "the original paint path this frame.",
                      BackendResultToString(backend_result));
               command_allocator->Reset();
