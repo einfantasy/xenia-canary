@@ -125,10 +125,11 @@ std::vector<std::wstring> D3D12Presenter::GetDLSSRuntimeDirectories() const {
   }
   exe_dir = exe_dir.substr(0, slash + 1);  // keep the trailing separator.
   const std::wstring runtime_root = exe_dir + L"runtime";
-  // The NGX runtime DLLs are staged in these subdirectories of the runtime
-  // root (see the runtime deployment layout). The SDK does not search
-  // recursively, so both are listed explicitly.
-  return {runtime_root + L"\\experimental", runtime_root + L"\\nvidia-vfg"};
+  // The NGX runtime DLLs (the SR feature nvngx_dlss.dll and the runtime core
+  // nvngxruntime.dll) are staged in the experimental subdirectory of the
+  // runtime root (see the runtime deployment layout). The SDK does not search
+  // recursively, so the directory is listed explicitly.
+  return {runtime_root + L"\\experimental"};
 }
 
 bool D3D12Presenter::CaptureGuestOutput(RawImage& image_out) {

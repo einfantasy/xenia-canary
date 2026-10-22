@@ -25,6 +25,7 @@
 #pragma warning(pop)
 
 #include "xenia/base/logging.h"
+#include "xenia/base/filesystem.h"
 
 namespace xe {
 namespace ui {
@@ -75,14 +76,29 @@ void NVSDK_CONV NGXResourceReleaseCallback(IUnknown* in_resource) {
   }
 }
 
+// C-style callback (NVSDK_CONV) that pipes NGX SDK log lines into Xenia's
+// logging. The SDK may call it from any thread, so it must be thread-safe and
+// free of C++ objects with destructors. Every line (ON and VERBOSE) is logged
+// so the cause of a failed capability check (e.g. InvalidParameter) is visible
+// in the target machine's log.
+void NVSDK_CONV NGXAppLogCallback(const char* message,
+                                  NVSDK_NGX_Logging_Level loggingLevel,
+                                  NVSDK_NGX_Feature sourceComponent) {
+  if (message) {
+    XELOGI("DLSS SR: NGX SDK [level={} feature={}] {}",
+           static_cast<int>(loggingLevel), static_cast<int>(sourceComponent),
+           message);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // SEH boundaries.
 //
 // The SDK can crash (access violation), not just return an error code. So every
-// SDK entry point is wrapped in __try/__except. A crash is treated as a failure
-// (NVSDK_NGX_Result_FAIL_PlatformError), which triggers the deterministic
-// fallback. The __try scope must not contain any C++ object with a destructor,
-// so these are free functions with only POD locals.
+// SDK entry point is wrapped in __try/__except. A crash is treated as a generic
+// failure (the initial NVSDK_NGX_Result_Fail value); the raw exception code is
+// reported via the seh_code out-param. The __try scope must not contain any C++
+// object with a destructor, so these are free functions with only POD locals.
 // ---------------------------------------------------------------------------
 
 __declspec(noinline) NVSDK_NGX_Result CallGetFeatureRequirements(
@@ -96,29 +112,23 @@ __declspec(noinline) NVSDK_NGX_Result CallGetFeatureRequirements(
   }
   __except (EXCEPTION_EXECUTE_HANDLER) {
     seh_code = static_cast<uint32_t>(GetExceptionCode());
-    result = NVSDK_NGX_Result_FAIL_PlatformError;
   }
   return result;
 }
 
 __declspec(noinline) NVSDK_NGX_Result CallInitWithProjectId(
     const char* project_id, const wchar_t* app_data_path,
-    const wchar_t* const* path_list, unsigned int path_list_length,
+    const NVSDK_NGX_FeatureCommonInfo* feature_info,
     ID3D12Device* device, uint32_t& seh_code) {
   seh_code = 0;
   NVSDK_NGX_Result result = NVSDK_NGX_Result_Fail;
-  NVSDK_NGX_FeatureCommonInfo common_info{};
-  common_info.PathListInfo.Path =
-      const_cast<const wchar_t**>(const_cast<const wchar_t* const*>(path_list));
-  common_info.PathListInfo.Length = path_list_length;
   __try {
     result = NVSDK_NGX_D3D12_Init_with_ProjectID(
-        project_id, NVSDK_NGX_ENGINE_TYPE_CUSTOM, "1.0", app_data_path, device,
-        &common_info, NVSDK_NGX_Version_API);
+        project_id, NVSDK_NGX_ENGINE_TYPE_CUSTOM, "xenia-canary-dlss", app_data_path, device,
+        feature_info, NVSDK_NGX_Version_API);
   }
   __except (EXCEPTION_EXECUTE_HANDLER) {
     seh_code = static_cast<uint32_t>(GetExceptionCode());
-    result = NVSDK_NGX_Result_FAIL_PlatformError;
   }
   return result;
 }
@@ -132,7 +142,6 @@ __declspec(noinline) NVSDK_NGX_Result CallAllocateParameters(
   }
   __except (EXCEPTION_EXECUTE_HANDLER) {
     seh_code = static_cast<uint32_t>(GetExceptionCode());
-    result = NVSDK_NGX_Result_FAIL_PlatformError;
   }
   return result;
 }
@@ -146,7 +155,6 @@ __declspec(noinline) NVSDK_NGX_Result CallDestroyParameters(
   }
   __except (EXCEPTION_EXECUTE_HANDLER) {
     seh_code = static_cast<uint32_t>(GetExceptionCode());
-    result = NVSDK_NGX_Result_FAIL_PlatformError;
   }
   return result;
 }
@@ -163,7 +171,6 @@ __declspec(noinline) NVSDK_NGX_Result CallCreateDlss(
   }
   __except (EXCEPTION_EXECUTE_HANDLER) {
     seh_code = static_cast<uint32_t>(GetExceptionCode());
-    result = NVSDK_NGX_Result_FAIL_PlatformError;
   }
   return result;
 }
@@ -180,7 +187,6 @@ __declspec(noinline) NVSDK_NGX_Result CallEvaluateDlss(
   }
   __except (EXCEPTION_EXECUTE_HANDLER) {
     seh_code = static_cast<uint32_t>(GetExceptionCode());
-    result = NVSDK_NGX_Result_FAIL_PlatformError;
   }
   return result;
 }
@@ -194,7 +200,6 @@ __declspec(noinline) NVSDK_NGX_Result CallReleaseFeature(
   }
   __except (EXCEPTION_EXECUTE_HANDLER) {
     seh_code = static_cast<uint32_t>(GetExceptionCode());
-    result = NVSDK_NGX_Result_FAIL_PlatformError;
   }
   return result;
 }
@@ -208,7 +213,6 @@ __declspec(noinline) NVSDK_NGX_Result CallShutdown1(ID3D12Device* device,
   }
   __except (EXCEPTION_EXECUTE_HANDLER) {
     seh_code = static_cast<uint32_t>(GetExceptionCode());
-    result = NVSDK_NGX_Result_FAIL_PlatformError;
   }
   return result;
 }
@@ -420,16 +424,31 @@ BackendResult DLSSSuperSamplingBackend::Initialize(
   discovery_common.PathListInfo.Path =
       const_cast<const wchar_t**>(path_list.data());
   discovery_common.PathListInfo.Length = path_list_length;
+  // Pipe the SDK's internal log lines into Xenia's logging so the cause of a
+  // failed capability check (e.g. InvalidParameter) is visible on the target.
+  discovery_common.LoggingInfo.LoggingCallback = NGXAppLogCallback;
+  discovery_common.LoggingInfo.MinimumLoggingLevel = NVSDK_NGX_LOGGING_LEVEL_VERBOSE;
   NVSDK_NGX_FeatureDiscoveryInfo discovery{};
   discovery.SDKVersion = NVSDK_NGX_Version_API;
   discovery.FeatureID = NVSDK_NGX_Feature_SuperSampling;
   discovery.Identifier.IdentifierType =
       NVSDK_NGX_Application_Identifier_Type_Project_Id;
-  discovery.Identifier.v.ProjectDesc.ProjectId = "xenia-dlss-sr";
+  discovery.Identifier.v.ProjectDesc.ProjectId = "8562ea46-f1a4-4c0c-9f18-fec4fa0db830";
   discovery.Identifier.v.ProjectDesc.EngineType = NVSDK_NGX_ENGINE_TYPE_CUSTOM;
-  discovery.Identifier.v.ProjectDesc.EngineVersion = "1.0";
-  discovery.ApplicationDataPath = L".";
+  discovery.Identifier.v.ProjectDesc.EngineVersion = "xenia-canary-dlss";
+  // ApplicationDataPath is the same experimental runtime directory the
+  // PathList points at (the SDK writes its logs/temp files there). It is an
+  // absolute, writable local path -- the SDK rejects the relative ".".
+  discovery.ApplicationDataPath = runtime_dirs_[0].c_str();
   discovery.FeatureInfo = &discovery_common;
+  // Diagnostic (logging only): print the exact paths handed to the NGX SDK so
+  // the runtime layout can be verified on the target machine. PathList is the
+  // list of directories the SDK scans for nvngx_dlss.dll / nvngxruntime.dll;
+  // ApplicationDataPath (the exe directory) is where the SDK stores logs and
+  // temp files; the CWD is logged for comparison. The log sink is narrow
+  // (UTF-8), so wide paths are converted first.
+  XELOGI("DLSS SR: capability check ApplicationDataPath = {}",
+         xe::path_to_utf8(discovery.ApplicationDataPath));
   NVSDK_NGX_FeatureRequirement requirement{};
   uint32_t seh_code = 0;
   NVSDK_NGX_Result requirement_result = CallGetFeatureRequirements(
@@ -458,7 +477,8 @@ BackendResult DLSSSuperSamplingBackend::Initialize(
   XELOGD("DLSS SR: SDK Init_with_ProjectID start (path_list_length={}).",
          path_list_length);
   NVSDK_NGX_Result init_result = CallInitWithProjectId(
-      "xenia-dlss-sr", L".", path_list.data(), path_list_length, device_,
+      discovery.Identifier.v.ProjectDesc.ProjectId, runtime_dirs_[0].c_str(), &discovery_common,
+      device_,
       seh_code);
   if (init_result != NVSDK_NGX_Result_Success) {
     XELOGE("DLSS SR: SDK Init failed (result={}, seh=0x{:08X}).",
@@ -517,6 +537,111 @@ BackendResult DLSSSuperSamplingBackend::Initialize(
   XELOGD("DLSS SR: backend output texture created ({}x{}, R10G10B10A2_UNORM, "
          "UAV state).",
          output_width, output_height);
+
+  // 4a. Zero-filled placeholder depth and motion-vector textures. The DLSS SR
+  //     feature (NGXDLAA) requires both inputs; Xbox 360 games produce neither,
+  //     so we feed all-zero values ("honest fallback"). The SDK's compute
+  //     shader binds both as UAVs (unordered access), so after zero-init they
+  //     must be left in D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE. The
+  //     SDK's D3D12 helper performs no state transitions of its own, so leaving
+  //     them in PIXEL_SHADER_RESOURCE faults the GPU and loses the device. The
+  //     SDK reads them and never writes their contents.
+  //     TODO: Replace with real depth estimation and NVOF-derived motion vectors.
+  auto create_zero_tex = [&](DXGI_FORMAT fmt)
+      -> Microsoft::WRL::ComPtr<ID3D12Resource> {
+    D3D12_RESOURCE_DESC td{};
+    td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    td.Width = input_width;
+    td.Height = input_height;
+    td.DepthOrArraySize = 1;
+    td.MipLevels = 1;
+    td.Format = fmt;
+    td.SampleDesc.Count = 1;
+    td.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    Microsoft::WRL::ComPtr<ID3D12Resource> r;
+    if (FAILED(device_->CreateCommittedResource(&kDefaultHeapProperties,
+            D3D12_HEAP_FLAG_NONE, &td, D3D12_RESOURCE_STATE_COMMON, nullptr,
+            IID_PPV_ARGS(&r)))) {
+      return nullptr;
+    }
+    return r;
+  };
+  depth_texture_ = create_zero_tex(DXGI_FORMAT_R32_FLOAT);
+  motion_vectors_texture_ = create_zero_tex(DXGI_FORMAT_R16G16_FLOAT);
+  if (!depth_texture_ || !motion_vectors_texture_) {
+    XELOGE("DLSS SR: failed to create zero-filled depth/motion textures.");
+    state_ = State::kUnavailable;
+    return BackendResult::kInitFailed;
+  }
+  // Zero-init: CPU upload buffer (memset 0) + CopyTextureRegion per texture.
+  const size_t zpp = 4;  // R32_FLOAT and R16G16_FLOAT are both 4 B/pixel.
+  const size_t up_row =
+      (static_cast<size_t>(input_width) * zpp + 255) & ~size_t(255);
+  const size_t up_size = up_row * input_height;
+  Microsoft::WRL::ComPtr<ID3D12Resource> up_buf;
+  {
+    D3D12_HEAP_PROPERTIES up_props{};
+    up_props.Type = D3D12_HEAP_TYPE_UPLOAD;
+    D3D12_RESOURCE_DESC up_desc{};
+    up_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    up_desc.Width = up_size;
+    up_desc.Height = 1;
+    up_desc.DepthOrArraySize = 1;
+    up_desc.MipLevels = 1;
+    up_desc.SampleDesc.Count = 1;
+    up_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    if (FAILED(device_->CreateCommittedResource(&up_props, D3D12_HEAP_FLAG_NONE,
+            &up_desc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+            IID_PPV_ARGS(&up_buf)))) {
+      XELOGE("DLSS SR: failed to create upload buffer for zero-init.");
+      state_ = State::kUnavailable;
+      return BackendResult::kInitFailed;
+    }
+    void* mapped = nullptr;
+    if (FAILED(up_buf->Map(0, nullptr, &mapped))) {
+      XELOGE("DLSS SR: failed to map upload buffer for zero-init.");
+      state_ = State::kUnavailable;
+      return BackendResult::kInitFailed;
+    }
+    memset(mapped, 0, up_size);
+    up_buf->Unmap(0, nullptr);
+  }
+  auto zero_copy = [&](ID3D12Resource* tex, DXGI_FORMAT fmt) {
+    D3D12_RESOURCE_BARRIER b{};
+    b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    b.Transition.pResource = tex;
+    b.Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
+    b.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+    b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    command_list->ResourceBarrier(1, &b);
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp{};
+    fp.Footprint.Format = fmt;
+    fp.Footprint.Width = input_width;
+    fp.Footprint.Height = input_height;
+    fp.Footprint.Depth = 1;
+    fp.Footprint.RowPitch = static_cast<UINT>(up_row);
+    D3D12_TEXTURE_COPY_LOCATION dst{};
+    dst.pResource = tex;
+    dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    dst.SubresourceIndex = 0;
+    D3D12_TEXTURE_COPY_LOCATION src{};
+    src.pResource = up_buf.Get();
+    src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    src.PlacedFootprint = fp;
+    command_list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+    D3D12_RESOURCE_BARRIER b2{};
+    b2.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    b2.Transition.pResource = tex;
+    b2.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+    b2.Transition.StateAfter = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    b2.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    command_list->ResourceBarrier(1, &b2);
+  };
+  zero_copy(depth_texture_.Get(), DXGI_FORMAT_R32_FLOAT);
+  zero_copy(motion_vectors_texture_.Get(), DXGI_FORMAT_R16G16_FLOAT);
+  XELOGD("DLSS SR: zero-filled depth (R32F) and motion-vector (R16G16F) "
+         "textures created ({}x{}).",
+         input_width, input_height);
 
   // 5. Record CreateFeature into the command list (GPU command, first command
   //    group). IsHDR=0 (guest output is R10G10B10A2_UNORM perceived LDR),
@@ -660,8 +785,8 @@ BackendResult DLSSSuperSamplingBackend::TryProcess(
   NVSDK_NGX_D3D12_DLSS_Eval_Params eval_params{};
   eval_params.Feature.pInColor = guest_output;
   eval_params.Feature.pInOutput = output_texture_.Get();
-  eval_params.pInDepth = nullptr;
-  eval_params.pInMotionVectors = nullptr;
+  eval_params.pInDepth = depth_texture_.Get();
+  eval_params.pInMotionVectors = motion_vectors_texture_.Get();
   eval_params.InJitterOffsetX = frame_params.jitter_x;
   eval_params.InJitterOffsetY = frame_params.jitter_y;
   eval_params.InReset = frame_params.in_reset ? 1 : 0;

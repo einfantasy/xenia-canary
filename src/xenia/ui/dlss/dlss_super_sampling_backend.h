@@ -142,6 +142,12 @@ class DLSSSuperSamplingBackend final : public IDLSSSuperSamplingBackend {
 
   // Backend-owned output texture (ALLOW_UNORDERED_ACCESS, starts in UAV state).
   Microsoft::WRL::ComPtr<ID3D12Resource> output_texture_;
+  // Zero-filled placeholder buffers for the DLSS SR feature's required depth
+  // and motion-vector inputs. Xbox 360 games do not produce these, so we feed
+  // all-zero values ("honest fallback"). The SDK never modifies them.
+  // TODO: Replace with real depth estimation and NVOF-derived motion vectors.
+  Microsoft::WRL::ComPtr<ID3D12Resource> depth_texture_;
+  Microsoft::WRL::ComPtr<ID3D12Resource> motion_vectors_texture_;
   // True after the per-frame final barrier transitions the output texture to
   // PIXEL_SHADER_RESOURCE. Used to decide whether a "to UAV" barrier is needed
   // before the next evaluate. Initially false (the output starts in UAV).
