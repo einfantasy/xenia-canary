@@ -84,9 +84,38 @@ D3D12Presenter::GetGuestOutputEnhancementConfigFromUIThread() const {
   return guest_output_enhancement_config_;
 }
 
+// Maps a BackendResult to a stable string for logging (failure classification
+// per the architecture design, section 5).
+static const char* BackendResultToString(BackendResult result) {
+  switch (result) {
+    case BackendResult::kNotRequested:
+      return "kNotRequested";
+    case BackendResult::kSuccess:
+      return "kSuccess";
+    case BackendResult::kUnavailable:
+      return "kUnavailable";
+    case BackendResult::kInitFailed:
+      return "kInitFailed";
+    case BackendResult::kInputContractFailed:
+      return "kInputContractFailed";
+    case BackendResult::kSyncConditionFailed:
+      return "kSyncConditionFailed";
+    case BackendResult::kExecutionFailed:
+      return "kExecutionFailed";
+    case BackendResult::kOutputInvalid:
+      return "kOutputInvalid";
+    case BackendResult::kOriginalPathFallback:
+      return "kOriginalPathFallback";
+  }
+  return "unknown";
+}
+
 std::vector<std::wstring> D3D12Presenter::GetDLSSRuntimeDirectories() const {
   wchar_t exe_path[MAX_PATH];
   if (!GetModuleFileNameW(nullptr, exe_path, MAX_PATH)) {
+    XELOGW("DLSS SR: could not determine the executable path; the DLSS "
+           "runtime directories are unavailable (the backend will report the "
+           "runtime as missing).");
     return {};
   }
   std::wstring exe_dir(exe_path);
@@ -780,6 +809,7 @@ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(
             // not bypassed). When the master switch is off this is never
             // reached, so no backend is created, no DLL is loaded, and no GPU
             // work is done.
+            const bool backend_just_created = (!dlss_sr_backend_);
             if (!dlss_sr_backend_) {
               dlss_sr_backend_ =
                   std::make_unique<xe::ui::dlss::DLSSSuperSamplingBackend>(
@@ -794,6 +824,13 @@ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(
                 frame_params, &fallback_flow);
             if (backend_result == BackendResult::kSuccess) {
               dlss_sr_used = true;
+              if (backend_just_created) {
+                XELOGI("DLSS SR: backend activated; the paint path now reads "
+                       "the DLSS output (input=%ux%u -> output=%ux%u).",
+                       guest_width, guest_height,
+                       paint_context_.swap_chain_width,
+                       paint_context_.swap_chain_height);
+              }
               // Create the SRV of the backend output in the view heap (CPU).
               // The backend owns the output texture; we only create a view of
               // it for the first paint effect to read.
@@ -820,6 +857,9 @@ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(
               // original path is re-recorded by the effect loop below. The guest
               // output is still in PIXEL_SHADER_RESOURCE (nothing was executed),
               // so the original path is safe.
+              XELOGW("DLSS SR: SelectOutputPath returned %s; falling back to "
+                     "the original paint path this frame.",
+                     BackendResultToString(backend_result));
               command_allocator->Reset();
               command_list->Reset(command_allocator, nullptr);
             }

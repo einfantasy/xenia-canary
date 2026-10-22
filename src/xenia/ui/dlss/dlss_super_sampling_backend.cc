@@ -261,6 +261,8 @@ void DLSSSuperSamplingBackend::Shutdown() {
   if (state_ == State::kNotInitialized) {
     return;
   }
+  XELOGI("DLSS SR: backend shutdown (input=%ux%u, output=%ux%u).",
+         input_width_, input_height_, output_width_, output_height_);
   ReleaseFeature();
   uint32_t seh_code = 0;
   CallShutdown1(device_, seh_code);
@@ -336,6 +338,11 @@ BackendResult DLSSSuperSamplingBackend::Initialize(
   if (requirement_result != NVSDK_NGX_Result_Success ||
       requirement.FeatureSupported != NVSDK_NGX_FeatureSupportResult_Supported) {
     // Capability check failed: the GPU / driver does not support DLSS SR.
+    XELOGE("DLSS SR: capability check failed (result=%d, supported=%d, "
+           "seh=0x%X); GPU/driver/runtime does not support DLSS SR. Caching as "
+           "unavailable (no retry).",
+           static_cast<int>(requirement_result),
+           static_cast<int>(requirement.FeatureSupported), seh_code);
     state_ = State::kUnavailable;
     return BackendResult::kUnavailable;
   }
@@ -345,6 +352,8 @@ BackendResult DLSSSuperSamplingBackend::Initialize(
       "xenia-dlss-sr", L".", path_list.data(), path_list_length, device_,
       seh_code);
   if (init_result != NVSDK_NGX_Result_Success) {
+    XELOGE("DLSS SR: SDK Init failed (result=%d, seh=0x%X).",
+           static_cast<int>(init_result), seh_code);
     state_ = State::kUnavailable;
     return InitFailureToBackendResult(init_result);
   }
@@ -354,6 +363,8 @@ BackendResult DLSSSuperSamplingBackend::Initialize(
   NVSDK_NGX_Result alloc_result = CallAllocateParameters(&parameter_block_,
                                                         seh_code);
   if (alloc_result != NVSDK_NGX_Result_Success || !parameter_block_) {
+    XELOGE("DLSS SR: parameter block allocation failed (result=%d, seh=0x%X).",
+           static_cast<int>(alloc_result), seh_code);
     state_ = State::kUnavailable;
     return InitFailureToBackendResult(alloc_result);
   }
@@ -407,6 +418,9 @@ BackendResult DLSSSuperSamplingBackend::Initialize(
   if (create_result != NVSDK_NGX_Result_Success || !feature_handle_) {
     // GPU-side CreateFeature failure: the presenter will Reset the command
     // list. Cache as unavailable so we do not retry the SDK.
+    XELOGE("DLSS SR: CreateFeature (GPU) failed (result=%d, seh=0x%X). Caching "
+           "as unavailable.",
+           static_cast<int>(create_result), seh_code);
     ReleaseFeature();
     state_ = State::kUnavailable;
     return InitFailureToBackendResult(create_result);
@@ -417,6 +431,9 @@ BackendResult DLSSSuperSamplingBackend::Initialize(
   output_width_ = output_width;
   output_height_ = output_height;
   state_ = State::kAvailable;
+  XELOGI("DLSS SR: backend initialized (input=%ux%u, output=%ux%u, "
+         "PerfQuality=Balanced).",
+         input_width, input_height, output_width, output_height);
   return BackendResult::kSuccess;
 }
 
@@ -445,6 +462,7 @@ BackendResult DLSSSuperSamplingBackend::TryProcess(
   }
 
   // Lazy init / re-create on size change.
+  bool just_initialized = false;
   if (state_ == State::kNotInitialized ||
       input_width != input_width_ || input_height != input_height_ ||
       output_width != output_width_ || output_height != output_height_) {
@@ -463,6 +481,7 @@ BackendResult DLSSSuperSamplingBackend::TryProcess(
     // After a fresh Initialize the output texture is in UAV state, so the first
     // evaluate does not need a "to UAV" barrier.
     output_in_pixel_shader_resource_ = false;
+    just_initialized = true;
   }
 
   // The backend is now available and sized correctly. Record the per-frame
@@ -522,6 +541,8 @@ BackendResult DLSSSuperSamplingBackend::TryProcess(
     // GPU-side EvaluateFeature failure: the presenter will Reset the command
     // list. The guest output and the backend output are still in their pre-
     // evaluate states (the barriers were recorded but not executed).
+    XELOGE("DLSS SR: EvaluateFeature (GPU) failed (result=%d, seh=0x%X).",
+           static_cast<int>(eval_result), seh_code);
     return BackendResult::kExecutionFailed;
   }
 
@@ -555,6 +576,10 @@ BackendResult DLSSSuperSamplingBackend::TryProcess(
   command_list->ResourceBarrier(1, &barrier_output_back);
   output_in_pixel_shader_resource_ = true;
 
+  if (just_initialized) {
+    XELOGI("DLSS SR: first frame evaluated (input=%ux%u -> output=%ux%u).",
+           input_width, input_height, output_width, output_height);
+  }
   return BackendResult::kSuccess;
 }
 
