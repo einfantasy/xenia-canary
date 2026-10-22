@@ -813,7 +813,7 @@ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(
             if (!dlss_sr_backend_) {
               dlss_sr_backend_ =
                   std::make_unique<xe::ui::dlss::DLSSSuperSamplingBackend>(
-                  device, provider_.GetAdapter(), GetDLSSRuntimeDirectories());
+                  device, GetDLSSRuntimeDirectories());
             }
             DlssSrFrameParams frame_params{};  // jitter 0, no reset (M3-B).
             Presenter::GuestOutputPaintFlow fallback_flow;

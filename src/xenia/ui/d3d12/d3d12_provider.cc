@@ -88,9 +88,6 @@ D3D12Provider::~D3D12Provider() {
   if (device_ != nullptr) {
     device_->Release();
   }
-  if (adapter_ != nullptr) {
-    adapter_->Release();
-  }
   if (dxgi_factory_ != nullptr) {
     dxgi_factory_->Release();
   }
@@ -332,10 +329,7 @@ bool D3D12Provider::Initialize() {
     dxgi_factory->Release();
     return false;
   }
-  // Retain the adapter (the DLSS backend borrows it for the capability
-  // check). It is released in the destructor. The failure paths above still
-  // release `adapter` directly.
-  adapter_ = adapter;
+  adapter->Release();
 
   // Configure the Direct3D 12 debug info queue.
   ID3D12InfoQueue* d3d12_info_queue;

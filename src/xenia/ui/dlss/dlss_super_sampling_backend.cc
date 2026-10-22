@@ -232,11 +232,8 @@ BackendResult InitFailureToBackendResult(NVSDK_NGX_Result result) {
 }  // namespace
 
 DLSSSuperSamplingBackend::DLSSSuperSamplingBackend(
-    ID3D12Device* device, IDXGIAdapter1* adapter,
-    std::vector<std::wstring> runtime_dirs)
-    : device_(device),
-      adapter_(adapter),
-      runtime_dirs_(std::move(runtime_dirs)) {}
+    ID3D12Device* device, std::vector<std::wstring> runtime_dirs)
+    : device_(device), runtime_dirs_(std::move(runtime_dirs)) {}
 
 DLSSSuperSamplingBackend::~DLSSSuperSamplingBackend() { Shutdown(); }
 
@@ -348,17 +345,59 @@ BackendResult DLSSSuperSamplingBackend::Initialize(
          luid_available ? adapter_luid.HighPart : 0,
          luid_available ? adapter_luid.LowPart : 0);
 
-  // 1. Capability check (CPU side, before any command is recorded). The adapter
-  //    is the one the provider used to create device_; it is borrowed (owned by
-  //    the provider, released in its destructor), never released here.
-  if (!adapter_) {
+  // 1. Capability check (CPU side, before any command is recorded). The provider
+  //    releases the adapter it used to create device_ (retaining it makes the
+  //    NVIDIA driver reject later CreateCommittedResource calls with E_INVALIDARG).
+  //    So the backend enumerates adapters itself and matches by LUID to find the
+  //    physical adapter device_ sits on. The matched adapter is used only for the
+  //    capability check, then released. Reuses the LUID resolved by the
+  //    diagnostic QI above (no second QueryInterface).
+  if (!luid_available) {
     if (!init_early_failure_logged_) {
-      XELOGE("DLSS SR: no DXGI adapter was provided by the provider; cannot "
+      XELOGE("DLSS SR: device does not expose ID3D12Device3 (QueryInterface "
+             "failed); cannot resolve the adapter LUID. Returning kInitFailed.");
+      init_early_failure_logged_ = true;
+    }
+    return BackendResult::kInitFailed;
+  }
+  Microsoft::WRL::ComPtr<IDXGIFactory1> factory;
+  if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) {
+    if (!init_early_failure_logged_) {
+      XELOGE("DLSS SR: CreateDXGIFactory1 failed; cannot enumerate adapters for "
+             "the capability check. Returning kInitFailed.");
+      init_early_failure_logged_ = true;
+    }
+    return BackendResult::kInitFailed;
+  }
+  Microsoft::WRL::ComPtr<IDXGIAdapter1> matched_adapter;
+  for (UINT i = 0;; ++i) {
+    Microsoft::WRL::ComPtr<IDXGIAdapter1> adapter;
+    const HRESULT enum_hr = factory->EnumAdapters1(i, adapter.GetAddressOf());
+    if (enum_hr == DXGI_ERROR_NOT_FOUND || FAILED(enum_hr)) {
+      break;  // end of enumeration (or unexpected error)
+    }
+    // Match by the adapter LUID embedded in its description. (GetDesc1 is used
+    // rather than IDXGIAdapter1::GetLuid because this toolchain's dxgi.h trims
+    // the latter; GetDesc1 is present in every SDK and carries the same LUID.)
+    DXGI_ADAPTER_DESC1 desc1{};
+    if (SUCCEEDED(adapter->GetDesc1(&desc1)) &&
+        desc1.AdapterLuid.HighPart == adapter_luid.HighPart &&
+        desc1.AdapterLuid.LowPart == adapter_luid.LowPart) {
+      matched_adapter = adapter;
+      break;
+    }
+  }
+  if (!matched_adapter) {
+    if (!init_early_failure_logged_) {
+      XELOGE("DLSS SR: no DXGI adapter with LUID {:04X}:{:04X} was found; cannot "
              "run the DLSS capability check. Returning kInitFailed.");
       init_early_failure_logged_ = true;
     }
     return BackendResult::kInitFailed;
   }
+  XELOGD("DLSS SR: matched DXGI adapter LUID {:04X}:{:04X} for the capability "
+         "check.",
+         adapter_luid.HighPart, adapter_luid.LowPart);
   // Build the PathList from the runtime directories. The SDK does not search
   // recursively, so each directory that may contain an NGX runtime DLL must be
   // listed explicitly.
@@ -394,7 +433,11 @@ BackendResult DLSSSuperSamplingBackend::Initialize(
   NVSDK_NGX_FeatureRequirement requirement{};
   uint32_t seh_code = 0;
   NVSDK_NGX_Result requirement_result = CallGetFeatureRequirements(
-      adapter_, &discovery, &requirement, seh_code);
+      matched_adapter.Get(), &discovery, &requirement, seh_code);
+  // The adapter is used only for the capability check above. Release it now;
+  // the rest of Initialize (SDK init, param alloc, texture create, CreateFeature)
+  // uses only device_.
+  matched_adapter.Reset();
   if (requirement_result != NVSDK_NGX_Result_Success ||
       requirement.FeatureSupported != NVSDK_NGX_FeatureSupportResult_Supported) {
     // Capability check failed: the GPU / driver does not support DLSS SR.

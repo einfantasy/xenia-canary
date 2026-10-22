@@ -82,12 +82,13 @@ class DLSSSuperSamplingBackend final : public IDLSSSuperSamplingBackend {
   // DLLs (nvngxruntime.dll, nvngx_dlss.dll). They are passed to the SDK via
   // NVSDK_NGX_FeatureCommonInfo.PathListInfo.Path. None are used until the
   // backend is actually initialized (lazy).
-  // `adapter` is the DXGI adapter the provider used to create `device`,
-  // borrowed (owned by the provider, released in its destructor). It is used
-  // only for the DLSS capability check (GetFeatureRequirements). It must outlive
-  // the backend.
+  // The provider releases the adapter it used to create `device` (retaining it
+  // makes the NVIDIA driver reject later CreateCommittedResource calls with
+  // E_INVALIDARG). So the backend enumerates adapters itself in Initialize()
+  // and matches by LUID (ID3D12Device3::GetAdapterLuid) to find the physical
+  // adapter `device` sits on; it is used only for the capability check and
+  // released immediately after.
   DLSSSuperSamplingBackend(ID3D12Device* device,
-                           IDXGIAdapter1* adapter,
                            std::vector<std::wstring> runtime_dirs);
   ~DLSSSuperSamplingBackend() override;
 
@@ -129,9 +130,6 @@ class DLSSSuperSamplingBackend final : public IDLSSSuperSamplingBackend {
   void ReleaseFeature();
 
   ID3D12Device* device_;
-  // Borrowed: the provider owns this and releases it in its destructor. The
-  // backend only reads it during Initialize(); it never Releases it.
-  IDXGIAdapter1* adapter_;
   std::vector<std::wstring> runtime_dirs_;
 
   State state_ = State::kNotInitialized;

@@ -50,7 +50,6 @@ class D3D12Provider : public GraphicsProvider {
     return graphics_analysis_;
   }
   ID3D12Device* GetDevice() const { return device_; }
-  IDXGIAdapter1* GetAdapter() const { return adapter_; }
   ID3D12CommandQueue* GetDirectQueue() const { return direct_queue_; }
 
   uint32_t GetDescriptorSize(D3D12_DESCRIPTOR_HEAP_TYPE type) const {
@@ -198,7 +197,6 @@ class D3D12Provider : public GraphicsProvider {
 
   IDXGIFactory2* dxgi_factory_ = nullptr;
   ID3D12Device* device_ = nullptr;
-  IDXGIAdapter1* adapter_ = nullptr;
   ID3D12CommandQueue* direct_queue_ = nullptr;
   IDXGraphicsAnalysis* graphics_analysis_ = nullptr;
 
