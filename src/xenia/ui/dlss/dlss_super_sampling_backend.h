@@ -33,6 +33,7 @@
 struct ID3D12Device;
 struct ID3D12GraphicsCommandList;
 struct ID3D12Resource;
+struct IDXGIAdapter1;
 struct NVSDK_NGX_Handle;
 struct NVSDK_NGX_Parameter;
 
@@ -81,6 +82,12 @@ class DLSSSuperSamplingBackend final : public IDLSSSuperSamplingBackend {
   // DLLs (nvngxruntime.dll, nvngx_dlss.dll). They are passed to the SDK via
   // NVSDK_NGX_FeatureCommonInfo.PathListInfo.Path. None are used until the
   // backend is actually initialized (lazy).
+  // The provider releases the adapter it used to create `device` (retaining it
+  // makes the NVIDIA driver reject later CreateCommittedResource calls with
+  // E_INVALIDARG). So the backend enumerates adapters itself in Initialize()
+  // and matches by LUID (ID3D12Device3::GetAdapterLuid) to find the physical
+  // adapter `device` sits on; it is used only for the capability check and
+  // released immediately after.
   DLSSSuperSamplingBackend(ID3D12Device* device,
                            std::vector<std::wstring> runtime_dirs);
   ~DLSSSuperSamplingBackend() override;
