@@ -148,6 +148,13 @@ class DLSSSuperSamplingBackend final : public IDLSSSuperSamplingBackend {
   // TODO: Replace with real depth estimation and NVOF-derived motion vectors.
   Microsoft::WRL::ComPtr<ID3D12Resource> depth_texture_;
   Microsoft::WRL::ComPtr<ID3D12Resource> motion_vectors_texture_;
+  // One-time CPU upload buffer used to zero-fill depth_texture_ /
+  // motion_vectors_texture_. Must stay alive for the backend's lifetime: the
+  // CopyTextureRegion that reads it is a GPU command executed at the end of the
+  // FIRST frame, AFTER Initialize() returns. A local would be released too
+  // early and fault the GPU (device removed 0x887A0006). Mirrors Veyra's
+  // member upload buffers (upDepth_/upZeroDepth_/upZeroMotion_).
+  Microsoft::WRL::ComPtr<ID3D12Resource> upload_buffer_;
   // True after the per-frame final barrier transitions the output texture to
   // PIXEL_SHADER_RESOURCE. Used to decide whether a "to UAV" barrier is needed
   // before the next evaluate. Initially false (the output starts in UAV).

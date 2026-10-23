@@ -279,6 +279,7 @@ void DLSSSuperSamplingBackend::Shutdown() {
   }
   g_ngx_device = nullptr;
   output_texture_.Reset();
+  upload_buffer_.Reset();
   output_in_pixel_shader_resource_ = false;
   input_width_ = 0;
   input_height_ = 0;
@@ -574,11 +575,14 @@ BackendResult DLSSSuperSamplingBackend::Initialize(
     return BackendResult::kInitFailed;
   }
   // Zero-init: CPU upload buffer (memset 0) + CopyTextureRegion per texture.
+  // The upload buffer is a MEMBER (upload_buffer_), not a local: the
+  // CopyTextureRegion that reads it is a GPU command executed at the end of the
+  // first frame, AFTER Initialize() returns. A local would be released too
+  // early and fault the GPU (device removed 0x887A0006).
   const size_t zpp = 4;  // R32_FLOAT and R16G16_FLOAT are both 4 B/pixel.
   const size_t up_row =
       (static_cast<size_t>(input_width) * zpp + 255) & ~size_t(255);
   const size_t up_size = up_row * input_height;
-  Microsoft::WRL::ComPtr<ID3D12Resource> up_buf;
   {
     D3D12_HEAP_PROPERTIES up_props{};
     up_props.Type = D3D12_HEAP_TYPE_UPLOAD;
@@ -592,19 +596,19 @@ BackendResult DLSSSuperSamplingBackend::Initialize(
     up_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
     if (FAILED(device_->CreateCommittedResource(&up_props, D3D12_HEAP_FLAG_NONE,
             &up_desc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
-            IID_PPV_ARGS(&up_buf)))) {
+            IID_PPV_ARGS(&upload_buffer_)))) {
       XELOGE("DLSS SR: failed to create upload buffer for zero-init.");
       state_ = State::kUnavailable;
       return BackendResult::kInitFailed;
     }
     void* mapped = nullptr;
-    if (FAILED(up_buf->Map(0, nullptr, &mapped))) {
+    if (FAILED(upload_buffer_->Map(0, nullptr, &mapped))) {
       XELOGE("DLSS SR: failed to map upload buffer for zero-init.");
       state_ = State::kUnavailable;
       return BackendResult::kInitFailed;
     }
     memset(mapped, 0, up_size);
-    up_buf->Unmap(0, nullptr);
+    upload_buffer_->Unmap(0, nullptr);
   }
   auto zero_copy = [&](ID3D12Resource* tex, DXGI_FORMAT fmt) {
     D3D12_RESOURCE_BARRIER b{};
@@ -625,7 +629,7 @@ BackendResult DLSSSuperSamplingBackend::Initialize(
     dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
     dst.SubresourceIndex = 0;
     D3D12_TEXTURE_COPY_LOCATION src{};
-    src.pResource = up_buf.Get();
+    src.pResource = upload_buffer_.Get();
     src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
     src.PlacedFootprint = fp;
     command_list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
@@ -643,9 +647,6 @@ BackendResult DLSSSuperSamplingBackend::Initialize(
          "textures created ({}x{}).",
          input_width, input_height);
 
-  // 5. Record CreateFeature into the command list (GPU command, first command
-  //    group). IsHDR=0 (guest output is R10G10B10A2_UNORM perceived LDR),
-  //    AutoExposure enabled (the SDK's estimator handles exposure).
   NVSDK_NGX_DLSS_Create_Params create_params{};
   create_params.Feature.InWidth = input_width;
   create_params.Feature.InHeight = input_height;
