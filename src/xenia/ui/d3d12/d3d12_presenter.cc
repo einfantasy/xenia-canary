@@ -827,27 +827,16 @@ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(
             // not bypassed). When the master switch is off this is never
             // reached, so no backend is created, no DLL is loaded, and no GPU
             // work is done.
-            const uint8_t requested_quality =
-                static_cast<uint8_t>(enhancement_config.perf_quality);
-            // The quality preset is baked into CreateFeature, so a change
-            // requires a full backend rebuild: the destructor runs ReleaseFeature
-            // + SDK Shutdown, and the backend is recreated below with the new
-            // preset. (The 1:1 bypass and size-change rebuilds use the same
-            // reset + lazy-recreation path.)
-            if (dlss_sr_backend_ &&
-                requested_quality != dlss_sr_backend_perf_quality_) {
-              XELOGI("DLSS SR: quality preset changed ({} -> {}); rebuilding "
-                     "the backend.",
-                    dlss_sr_backend_perf_quality_, requested_quality);
-              dlss_sr_backend_.reset();
-            }
+            // The quality preset is a create-time parameter passed to the
+            // backend on every frame; the backend detects a change and
+            // re-creates the feature internally (release + re-create), exactly
+            // like a size change. So no full backend rebuild is needed here.
             const bool backend_just_created = (!dlss_sr_backend_);
             if (!dlss_sr_backend_) {
               dlss_sr_backend_ =
                   std::make_unique<xe::ui::dlss::DLSSSuperSamplingBackend>(
                   device, GetDLSSRuntimeDirectories(), GetDLSSConfigPath(),
                   enhancement_config.perf_quality);
-              dlss_sr_backend_perf_quality_ = requested_quality;
             }
             DlssSrFrameParams frame_params{};  // jitter 0, no reset (M3-B).
             Presenter::GuestOutputPaintFlow fallback_flow;

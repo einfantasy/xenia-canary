@@ -56,7 +56,8 @@ BackendResult SelectOutputPath(const GuestOutputEnhancementConfig& config,
   // 2. Requested: ask the backend to process the frame.
   BackendResult result =
       backend->TryProcess(command_list, guest_output_resource, output_width,
-                          output_height, guest_output_properties, frame_params);
+                          output_height, guest_output_properties, frame_params,
+                          config.perf_quality);
 
   // 3. Success: the backend produced usable output. Use the backend path.
   if (result == BackendResult::kSuccess) {

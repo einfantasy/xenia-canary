@@ -280,7 +280,7 @@ DLSSSuperSamplingBackend::DLSSSuperSamplingBackend(
     : device_(device),
       runtime_dirs_(std::move(runtime_dirs)),
       config_path_(std::move(config_path)),
-      perf_quality_(perf_quality) {}
+      created_perf_quality_(perf_quality) {}
 
 DLSSSuperSamplingBackend::~DLSSSuperSamplingBackend() { Shutdown(); }
 
@@ -401,7 +401,8 @@ bool DLSSSuperSamplingBackend::LoadNgxConfig(std::string* project_id_out,
 
 BackendResult DLSSSuperSamplingBackend::Initialize(
     ID3D12GraphicsCommandList* command_list, uint32_t input_width,
-    uint32_t input_height, uint32_t output_width, uint32_t output_height) {
+    uint32_t input_height, uint32_t output_width, uint32_t output_height,
+    ui::DlssSrPerfQuality perf_quality) {
   if (!device_ || !command_list) {
     if (!init_early_failure_logged_) {
       XELOGE("DLSS SR: Initialize called with a null device or command_list; "
@@ -411,15 +412,16 @@ BackendResult DLSSSuperSamplingBackend::Initialize(
     return BackendResult::kInputContractFailed;
   }
 
-  // The quality preset is a create-time parameter fixed at construction. An
-  // out-of-range value is a first-creation failure: cache as unavailable (no
-  // retry, per the lazy-init contract) and report the input contract failure
-  // to the presenter. It is never clamped or silently passed to the SDK.
-  if (static_cast<uint8_t>(perf_quality_) > 3) {
+  // The quality preset is a create-time parameter, passed per frame and baked
+  // into CreateFeature. An out-of-range value is a creation failure: cache as
+  // unavailable (no retry, per the lazy-init contract) and report the input
+  // contract failure to the presenter. It is never clamped or silently passed
+  // to the SDK.
+  if (static_cast<uint8_t>(perf_quality) > 3) {
     XELOGW("DLSS SR: invalid quality preset {} (must be 0..3; UltraQuality is "
            "not supported by the current DLSS runtime); caching the "
            "backend as unavailable.",
-          static_cast<uint8_t>(perf_quality_));
+           static_cast<uint8_t>(perf_quality));
     state_ = State::kUnavailable;
     return BackendResult::kInputContractFailed;
   }
@@ -522,8 +524,9 @@ BackendResult DLSSSuperSamplingBackend::Initialize(
   discovery_common.PathListInfo.Length = path_list_length;
   // Pipe the SDK's internal log lines into Xenia's logging so the cause of a
   // failed capability check (e.g. InvalidParameter) is visible on the target.
-  discovery_common.LoggingInfo.LoggingCallback = NGXAppLogCallback;
-  discovery_common.LoggingInfo.MinimumLoggingLevel = NVSDK_NGX_LOGGING_LEVEL_VERBOSE;
+  // If need to check logs from NGX SDK Side, toggle this comment.
+  // discovery_common.LoggingInfo.LoggingCallback = NGXAppLogCallback;
+  // discovery_common.LoggingInfo.MinimumLoggingLevel = NVSDK_NGX_LOGGING_LEVEL_VERBOSE;
   // Load the ProjectId / EngineVersion from ngx-local.json (auto-generating a
   // default config if the file is missing). A missing/malformed config is a
   // persistent failure: log once and return kInitFailed (state stays
@@ -766,7 +769,7 @@ BackendResult DLSSSuperSamplingBackend::Initialize(
   create_params.Feature.InTargetHeight = output_height;
   create_params.Feature.InPerfQualityValue =
       static_cast<NVSDK_NGX_PerfQuality_Value>(
-          static_cast<uint8_t>(perf_quality_));
+          static_cast<uint8_t>(perf_quality));
   create_params.InFeatureCreateFlags =
       static_cast<int>(NVSDK_NGX_DLSS_Feature_Flags_AutoExposure);
   create_params.InEnableOutputSubrects = 0;
@@ -790,11 +793,12 @@ BackendResult DLSSSuperSamplingBackend::Initialize(
   input_height_ = input_height;
   output_width_ = output_width;
   output_height_ = output_height;
+  created_perf_quality_ = perf_quality;
   state_ = State::kAvailable;
   XELOGI("DLSS SR: backend initialized (input={}x{}, output={}x{}, "
          "PerfQuality={}).",
          input_width, input_height, output_width, output_height,
-         PerfQualityName(perf_quality_));
+         PerfQualityName(perf_quality));
   return BackendResult::kSuccess;
 }
 
@@ -802,7 +806,8 @@ BackendResult DLSSSuperSamplingBackend::TryProcess(
     ID3D12GraphicsCommandList* command_list, ID3D12Resource* guest_output,
     uint32_t output_width, uint32_t output_height,
     const Presenter::GuestOutputProperties& guest_output_properties,
-    const DlssSrFrameParams& frame_params) {
+    const DlssSrFrameParams& frame_params,
+    ui::DlssSrPerfQuality requested_quality) {
   // 0. Cached unavailable: do not retry the SDK.
   if (state_ == State::kUnavailable) {
     return BackendResult::kUnavailable;
@@ -839,20 +844,21 @@ BackendResult DLSSSuperSamplingBackend::TryProcess(
     return BackendResult::kInputContractFailed;
   }
 
-  // Lazy init / re-create on size change.
+  // Lazy init / re-create on size or quality change.
   bool just_initialized = false;
   if (state_ == State::kNotInitialized ||
       input_width != input_width_ || input_height != input_height_ ||
-      output_width != output_width_ || output_height != output_height_) {
+      output_width != output_width_ || output_height != output_height_ ||
+      requested_quality != created_perf_quality_) {
     if (state_ == State::kAvailable) {
-      // Size changed: release the feature and re-create.
+      // Size or quality changed: release the feature and re-create.
       ReleaseFeature();
       output_texture_.Reset();
       state_ = State::kNotInitialized;
     }
     BackendResult init_result =
         Initialize(command_list, input_width, input_height, output_width,
-                   output_height);
+                   output_height, requested_quality);
     if (init_result != BackendResult::kSuccess) {
       return init_result;
     }

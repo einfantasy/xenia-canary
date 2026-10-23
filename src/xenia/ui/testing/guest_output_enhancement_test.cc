@@ -33,7 +33,8 @@ class StubBackend final : public IDLSSSuperSamplingBackend {
       ID3D12GraphicsCommandList* command_list, ID3D12Resource* guest_output,
       uint32_t output_width, uint32_t output_height,
       const Presenter::GuestOutputProperties& guest_output_properties,
-      const DlssSrFrameParams& frame_params) override {
+      const DlssSrFrameParams& frame_params,
+      DlssSrPerfQuality perf_quality) override {
     // The stub performs no real GPU work; it ignores the GPU parameters and
     // returns the configured result to drive the path-selection logic.
     (void)command_list;
@@ -42,6 +43,7 @@ class StubBackend final : public IDLSSSuperSamplingBackend {
     (void)output_height;
     (void)guest_output_properties;
     (void)frame_params;
+    (void)perf_quality;
     return result_;
   }
 

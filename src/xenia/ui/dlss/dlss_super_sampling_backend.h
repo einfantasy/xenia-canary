@@ -111,7 +111,8 @@ class DLSSSuperSamplingBackend final : public IDLSSSuperSamplingBackend {
       uint32_t output_width,
       uint32_t output_height,
       const Presenter::GuestOutputProperties& guest_output_properties,
-      const DlssSrFrameParams& frame_params) override;
+      const DlssSrFrameParams& frame_params,
+      ui::DlssSrPerfQuality perf_quality) override;
 
   // Getters for the backend output. The presenter uses these to create the SRV
   // (in its view heap) and to know the output size. The output texture is owned
@@ -127,10 +128,14 @@ class DLSSSuperSamplingBackend final : public IDLSSSuperSamplingBackend {
 
   // Creates the SDK session and the output texture. Records CreateFeature into
   // `command_list`. Returns kSuccess, or a failure (kUnavailable when the
-  // capability check / Init fails, kInitFailed for other init errors).
+  // capability check / Init fails, kInitFailed for other init errors). The
+  // quality preset is passed in (it is a create-time parameter); the backend
+  // stores it as created_perf_quality_ on success so a later change is
+  // detected as a re-create.
   BackendResult Initialize(ID3D12GraphicsCommandList* command_list,
                            uint32_t input_width, uint32_t input_height,
-                           uint32_t output_width, uint32_t output_height);
+                           uint32_t output_width, uint32_t output_height,
+                           ui::DlssSrPerfQuality perf_quality);
   // Ensures the ngx-local.json config exists at config_path_. If it is missing,
   // the parent directory is created and a default config (matching the former
   // hardcoded ProjectId/EngineVersion, so a missing config is behavior-neutral)
@@ -150,7 +155,11 @@ class DLSSSuperSamplingBackend final : public IDLSSSuperSamplingBackend {
   std::vector<std::wstring> runtime_dirs_;
   std::wstring config_path_;
   // Quality preset used by Initialize() when filling the create parameters.
-  ui::DlssSrPerfQuality perf_quality_;
+  // The quality preset the current feature was created with. Initialized to the
+  // constructor's quality; updated by Initialize() on every (re-)creation. A
+  // per-frame TryProcess whose requested quality differs from this value
+  // triggers a re-create (release + re-create), just like a size change.
+  ui::DlssSrPerfQuality created_perf_quality_;
 
   State state_ = State::kNotInitialized;
   // The backend's identity: input size x output size. Any change requires a

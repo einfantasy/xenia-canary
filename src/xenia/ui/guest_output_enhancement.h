@@ -217,13 +217,19 @@ class IDLSSSuperSamplingBackend {
   // given by `guest_output_properties.frontbuffer_width/height`. The backend
   // output is written to a texture it owns, at `output_width` x `output_height`
   // (the target resolution).
+  //
+  // `perf_quality` is the DLSS SR quality preset for this frame. It is a
+  // create-time parameter baked into the SDK's CreateFeature, so a change from
+  // the quality the feature was created with triggers a backend re-create
+  // (release + re-create), exactly like a change to the output size.
   virtual BackendResult TryProcess(
       ID3D12GraphicsCommandList* command_list,
       ID3D12Resource* guest_output,
       uint32_t output_width,
       uint32_t output_height,
       const Presenter::GuestOutputProperties& guest_output_properties,
-      const DlssSrFrameParams& frame_params) = 0;
+      const DlssSrFrameParams& frame_params,
+      DlssSrPerfQuality perf_quality) = 0;
 
   // The backend's owned output texture, valid after a successful TryProcess
   // (the backend created it during initialization). The presenter uses these

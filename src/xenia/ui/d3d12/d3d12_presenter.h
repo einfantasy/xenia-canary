@@ -371,10 +371,6 @@ class D3D12Presenter final : public Presenter {
   // output (read-only). nullptr when SR has never been requested. The backend
   // never touches guest_output_resource_paint_refs.
   std::unique_ptr<IDLSSSuperSamplingBackend> dlss_sr_backend_;
-  // The quality preset baked into dlss_sr_backend_'s CreateFeature (255 = the
-  // backend was never created). The preset is a create-time parameter, so a
-  // change requires a rebuild (reset + lazy recreation on the next frame).
-  uint8_t dlss_sr_backend_perf_quality_ = 0xFF;
 
   // DLSS SR enhancement config. Writable only by the UI thread, read by the
   // paint thread (under guest_output_enhancement_config_mutex_). All switches
