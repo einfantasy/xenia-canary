@@ -27,6 +27,18 @@
 #include "xenia/base/logging.h"
 #include "xenia/base/filesystem.h"
 
+#include <filesystem>
+#include <fstream>
+#include <sstream>
+
+// rapidjson (header-only, vendored in third_party) parses the ngx-local.json
+// config. The include dir is added via CMake (xenia-dlss target). It is wrapped
+// in a warning suppression like the SDK headers, since it is third-party code.
+#pragma warning(push)
+#pragma warning(disable : 4100 4127 4189 4244 4267 4310 4324 4456 4458 4514 4611 4820)
+#include <rapidjson/document.h>
+#pragma warning(pop)
+
 namespace xe {
 namespace ui {
 namespace dlss {
@@ -117,14 +129,15 @@ __declspec(noinline) NVSDK_NGX_Result CallGetFeatureRequirements(
 }
 
 __declspec(noinline) NVSDK_NGX_Result CallInitWithProjectId(
-    const char* project_id, const wchar_t* app_data_path,
+    const char* project_id, const char* engine_version,
+    const wchar_t* app_data_path,
     const NVSDK_NGX_FeatureCommonInfo* feature_info,
     ID3D12Device* device, uint32_t& seh_code) {
   seh_code = 0;
   NVSDK_NGX_Result result = NVSDK_NGX_Result_Fail;
   __try {
     result = NVSDK_NGX_D3D12_Init_with_ProjectID(
-        project_id, NVSDK_NGX_ENGINE_TYPE_CUSTOM, "xenia-canary-dlss", app_data_path, device,
+        project_id, NVSDK_NGX_ENGINE_TYPE_CUSTOM, engine_version, app_data_path, device,
         feature_info, NVSDK_NGX_Version_API);
   }
   __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -233,11 +246,41 @@ BackendResult InitFailureToBackendResult(NVSDK_NGX_Result result) {
   }
 }
 
+// Default ngx-local.json content, written when the config file is missing.
+// These match the former hardcoded ProjectId/EngineVersion, so a missing
+// config behaves exactly as before (no behavior change when no config exists).
+const char kDefaultNgxConfigJson[] = R"({
+    "engineType": "custom",
+    "engineVersion": "xenia-canary-dlss",
+    "ngxProjectId": "8562ea46-f1a4-4c0c-9f18-fec4fa0db830"
+})";
+
+// Display name of a quality preset for the log lines. The mapping from the
+// Xenia-side enum to the SDK enum is a plain cast (same numeric values, see
+// nvsdk_ngx_defs.h:251-260); the name is only for logging.
+const char* PerfQualityName(ui::DlssSrPerfQuality quality) {
+  switch (quality) {
+    case ui::DlssSrPerfQuality::kMaxPerf:
+      return "MaxPerf";
+    case ui::DlssSrPerfQuality::kBalanced:
+      return "Balanced";
+    case ui::DlssSrPerfQuality::kMaxQuality:
+      return "MaxQuality";
+    case ui::DlssSrPerfQuality::kUltraPerformance:
+      return "UltraPerformance";
+  }
+  return "Invalid";
+}
+
 }  // namespace
 
 DLSSSuperSamplingBackend::DLSSSuperSamplingBackend(
-    ID3D12Device* device, std::vector<std::wstring> runtime_dirs)
-    : device_(device), runtime_dirs_(std::move(runtime_dirs)) {}
+    ID3D12Device* device, std::vector<std::wstring> runtime_dirs,
+    std::wstring config_path, ui::DlssSrPerfQuality perf_quality)
+    : device_(device),
+      runtime_dirs_(std::move(runtime_dirs)),
+      config_path_(std::move(config_path)),
+      perf_quality_(perf_quality) {}
 
 DLSSSuperSamplingBackend::~DLSSSuperSamplingBackend() { Shutdown(); }
 
@@ -317,6 +360,45 @@ void DLSSSuperSamplingBackend::ReleaseFeature() {
   }
 }
 
+bool DLSSSuperSamplingBackend::EnsureConfigFile() const {
+  const std::filesystem::path path(config_path_);
+  if (std::filesystem::exists(path)) {
+    // Existing config is the user's source of truth; never overwrite it.
+    return true;
+  }
+  std::error_code ec;
+  std::filesystem::create_directories(path.parent_path(), ec);
+  std::ofstream out(path, std::ios::binary);
+  if (!out) {
+    return false;
+  }
+  out << kDefaultNgxConfigJson;
+  out.flush();
+  return static_cast<bool>(out);
+}
+
+bool DLSSSuperSamplingBackend::LoadNgxConfig(std::string* project_id_out,
+                                            std::string* engine_version_out) const {
+  std::ifstream in(config_path_);
+  if (!in) {
+    return false;
+  }
+  std::ostringstream contents;
+  contents << in.rdbuf();
+  rapidjson::Document doc;
+  doc.Parse(contents.str().c_str());
+  if (doc.HasParseError() || !doc.IsObject()) {
+    return false;
+  }
+  if (!doc.HasMember("ngxProjectId") || !doc["ngxProjectId"].IsString() ||
+      !doc.HasMember("engineVersion") || !doc["engineVersion"].IsString()) {
+    return false;
+  }
+  *project_id_out = doc["ngxProjectId"].GetString();
+  *engine_version_out = doc["engineVersion"].GetString();
+  return !project_id_out->empty() && !engine_version_out->empty();
+}
+
 BackendResult DLSSSuperSamplingBackend::Initialize(
     ID3D12GraphicsCommandList* command_list, uint32_t input_width,
     uint32_t input_height, uint32_t output_width, uint32_t output_height) {
@@ -326,6 +408,19 @@ BackendResult DLSSSuperSamplingBackend::Initialize(
              "cannot create the SDK session. Returning kInputContractFailed.");
       init_early_failure_logged_ = true;
     }
+    return BackendResult::kInputContractFailed;
+  }
+
+  // The quality preset is a create-time parameter fixed at construction. An
+  // out-of-range value is a first-creation failure: cache as unavailable (no
+  // retry, per the lazy-init contract) and report the input contract failure
+  // to the presenter. It is never clamped or silently passed to the SDK.
+  if (static_cast<uint8_t>(perf_quality_) > 3) {
+    XELOGW("DLSS SR: invalid quality preset {} (must be 0..3; UltraQuality is "
+           "not supported by the current DLSS runtime); caching the "
+           "backend as unavailable.",
+          static_cast<uint8_t>(perf_quality_));
+    state_ = State::kUnavailable;
     return BackendResult::kInputContractFailed;
   }
 
@@ -429,14 +524,32 @@ BackendResult DLSSSuperSamplingBackend::Initialize(
   // failed capability check (e.g. InvalidParameter) is visible on the target.
   discovery_common.LoggingInfo.LoggingCallback = NGXAppLogCallback;
   discovery_common.LoggingInfo.MinimumLoggingLevel = NVSDK_NGX_LOGGING_LEVEL_VERBOSE;
+  // Load the ProjectId / EngineVersion from ngx-local.json (auto-generating a
+  // default config if the file is missing). A missing/malformed config is a
+  // persistent failure: log once and return kInitFailed (state stays
+  // kNotInitialized, so Initialize is retried next frame; if the user fixes the
+  // config, the backend recovers). No behavior change when no config exists:
+  // the auto-generated defaults match the former hardcoded values.
+  std::string project_id;
+  std::string engine_version;
+  if (!EnsureConfigFile() || !LoadNgxConfig(&project_id, &engine_version)) {
+    if (!config_failure_logged_) {
+      XELOGE("DLSS SR: failed to load the ngx-local.json config at {}; the "
+             "DLSS ProjectId/EngineVersion are unavailable. Returning "
+             "kInitFailed.",
+             xe::path_to_utf8(config_path_));
+      config_failure_logged_ = true;
+    }
+    return BackendResult::kInitFailed;
+  }
   NVSDK_NGX_FeatureDiscoveryInfo discovery{};
   discovery.SDKVersion = NVSDK_NGX_Version_API;
   discovery.FeatureID = NVSDK_NGX_Feature_SuperSampling;
   discovery.Identifier.IdentifierType =
       NVSDK_NGX_Application_Identifier_Type_Project_Id;
-  discovery.Identifier.v.ProjectDesc.ProjectId = "8562ea46-f1a4-4c0c-9f18-fec4fa0db830";
+  discovery.Identifier.v.ProjectDesc.ProjectId = project_id.c_str();
   discovery.Identifier.v.ProjectDesc.EngineType = NVSDK_NGX_ENGINE_TYPE_CUSTOM;
-  discovery.Identifier.v.ProjectDesc.EngineVersion = "xenia-canary-dlss";
+  discovery.Identifier.v.ProjectDesc.EngineVersion = engine_version.c_str();
   // ApplicationDataPath is the same experimental runtime directory the
   // PathList points at (the SDK writes its logs/temp files there). It is an
   // absolute, writable local path -- the SDK rejects the relative ".".
@@ -478,9 +591,8 @@ BackendResult DLSSSuperSamplingBackend::Initialize(
   XELOGD("DLSS SR: SDK Init_with_ProjectID start (path_list_length={}).",
          path_list_length);
   NVSDK_NGX_Result init_result = CallInitWithProjectId(
-      discovery.Identifier.v.ProjectDesc.ProjectId, runtime_dirs_[0].c_str(), &discovery_common,
-      device_,
-      seh_code);
+      project_id.c_str(), engine_version.c_str(), runtime_dirs_[0].c_str(),
+      &discovery_common, device_, seh_code);
   if (init_result != NVSDK_NGX_Result_Success) {
     XELOGE("DLSS SR: SDK Init failed (result={}, seh=0x{:08X}).",
            static_cast<int>(init_result), seh_code);
@@ -653,7 +765,8 @@ BackendResult DLSSSuperSamplingBackend::Initialize(
   create_params.Feature.InTargetWidth = output_width;
   create_params.Feature.InTargetHeight = output_height;
   create_params.Feature.InPerfQualityValue =
-      NVSDK_NGX_PerfQuality_Value_Balanced;
+      static_cast<NVSDK_NGX_PerfQuality_Value>(
+          static_cast<uint8_t>(perf_quality_));
   create_params.InFeatureCreateFlags =
       static_cast<int>(NVSDK_NGX_DLSS_Feature_Flags_AutoExposure);
   create_params.InEnableOutputSubrects = 0;
@@ -679,8 +792,9 @@ BackendResult DLSSSuperSamplingBackend::Initialize(
   output_height_ = output_height;
   state_ = State::kAvailable;
   XELOGI("DLSS SR: backend initialized (input={}x{}, output={}x{}, "
-         "PerfQuality=Balanced).",
-         input_width, input_height, output_width, output_height);
+         "PerfQuality={}).",
+         input_width, input_height, output_width, output_height,
+         PerfQualityName(perf_quality_));
   return BackendResult::kSuccess;
 }
 

@@ -74,14 +74,18 @@ namespace dlss {
 // to execute and when to reset.
 class DLSSSuperSamplingBackend final : public IDLSSSuperSamplingBackend {
  public:
-  // `device` is the D3D12 device; `runtime_dir` is the directory containing the
-  // NGX runtime DLLs (nvngxruntime.dll, nvngx_dlss.dll), passed to the SDK via
-  // NVSDK_NGX_FeatureCommonInfo.PathListInfo.Path. Neither is used until the
-  // backend is actually initialized (lazy).
   // `runtime_dirs` is the list of directories to search for the NGX runtime
   // DLLs (nvngxruntime.dll, nvngx_dlss.dll). They are passed to the SDK via
   // NVSDK_NGX_FeatureCommonInfo.PathListInfo.Path. None are used until the
   // backend is actually initialized (lazy).
+  // `config_path` is the absolute path to the ngx-local.json config file
+  // (the NGX ProjectId and EngineVersion are read from it). The backend
+  // auto-generates a default config if the file is missing. It is not used
+  // until the backend is actually initialized (lazy).
+  // `perf_quality` is the DLSS SR quality preset (a create-time parameter,
+  // baked into CreateFeature). The backend maps it to the SDK enum
+  // NVSDK_NGX_PerfQuality_Value; an out-of-range value is an input contract
+  // failure (deterministic fallback), never a silent clamp.
   // The provider releases the adapter it used to create `device` (retaining it
   // makes the NVIDIA driver reject later CreateCommittedResource calls with
   // E_INVALIDARG). So the backend enumerates adapters itself in Initialize()
@@ -89,7 +93,9 @@ class DLSSSuperSamplingBackend final : public IDLSSSuperSamplingBackend {
   // adapter `device` sits on; it is used only for the capability check and
   // released immediately after.
   DLSSSuperSamplingBackend(ID3D12Device* device,
-                           std::vector<std::wstring> runtime_dirs);
+                           std::vector<std::wstring> runtime_dirs,
+                           std::wstring config_path,
+                           ui::DlssSrPerfQuality perf_quality);
   ~DLSSSuperSamplingBackend() override;
 
   DLSSSuperSamplingBackend(const DLSSSuperSamplingBackend&) = delete;
@@ -125,12 +131,26 @@ class DLSSSuperSamplingBackend final : public IDLSSSuperSamplingBackend {
   BackendResult Initialize(ID3D12GraphicsCommandList* command_list,
                            uint32_t input_width, uint32_t input_height,
                            uint32_t output_width, uint32_t output_height);
+  // Ensures the ngx-local.json config exists at config_path_. If it is missing,
+  // the parent directory is created and a default config (matching the former
+  // hardcoded ProjectId/EngineVersion, so a missing config is behavior-neutral)
+  // is written. An existing file is never overwritten (it is the user's source
+  // of truth). Returns true on success.
+  bool EnsureConfigFile() const;
+  // Reads config_path_ and extracts ngxProjectId and engineVersion. Returns true
+  // on success (both populated and non-empty), false on malformed JSON or
+  // missing/empty keys.
+  bool LoadNgxConfig(std::string* project_id_out,
+                    std::string* engine_version_out) const;
   // Releases the SDK feature and parameter block. Does NOT release the output
   // texture (that is done by Shutdown / the destructor).
   void ReleaseFeature();
 
   ID3D12Device* device_;
   std::vector<std::wstring> runtime_dirs_;
+  std::wstring config_path_;
+  // Quality preset used by Initialize() when filling the create parameters.
+  ui::DlssSrPerfQuality perf_quality_;
 
   State state_ = State::kNotInitialized;
   // The backend's identity: input size x output size. Any change requires a
@@ -165,6 +185,13 @@ class DLSSSuperSamplingBackend final : public IDLSSSuperSamplingBackend {
   // failure is logged only once to avoid per-frame spam. Diagnostic only -
   // the presenter separately logs the fallback this frame.
   bool contract_failure_logged_ = false;
+
+  // True after the first config load failure (missing/malformed ngx-local.json)
+  // has been logged. The failure leaves state_ as kNotInitialized, so Initialize
+  // is retried every frame; the failure is logged only once to avoid per-frame
+  // spam. (A user who fixes the config at runtime is picked up on the next
+  // frame.)
+  bool config_failure_logged_ = false;
 
   // True after the first early Initialize failure (null device/command_list,
   // QueryInterface, GetAdapter, or empty runtime path list) has been logged.

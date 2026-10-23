@@ -262,6 +262,13 @@ class EmulatorWindow {
   GetGuestOutputPaintConfigForCvars();
   static ui::GuestOutputEnhancementConfig
   GetGuestOutputEnhancementConfigForCvars();
+  // For comparisons, use GetDlssSrPerfQualityForCvarValue instead as the
+  // default fallback may be used for multiple values (any unknown value maps
+  // to kBalanced).
+  static const char* GetCvarValueForDlssSrPerfQuality(
+      ui::DlssSrPerfQuality perf_quality);
+  static ui::DlssSrPerfQuality GetDlssSrPerfQualityForCvarValue(
+      const std::string& cvar_value);
   void ApplyDisplayConfigForCvars();
 
   void OnKeyDown(ui::KeyEvent& e);

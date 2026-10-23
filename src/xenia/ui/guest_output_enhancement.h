@@ -35,6 +35,26 @@ namespace xe {
 namespace ui {
 
 // ---------------------------------------------------------------------------
+// DlssSrPerfQuality
+//
+// Xenia-side subset of NVSDK_NGX_PerfQuality_Value (DLSS SDK 310.9.1,
+// nvsdk_ngx_defs.h:251-260). The UI/config layer never includes any nvsdk_*
+// header (license isolation: SDK dependencies are confined to the dlss/*
+// module); the backend maps this value to the SDK enum at feature creation.
+// Two SDK values are intentionally absent:
+//   - UltraQuality (=4): not supported by the current DLSS runtime version;
+//     the UI does not expose it and the backend never sends it.
+//   - DLAA (=5): means input size == output size (1.0 scaling), which has no
+//     meaning for the guest output path.
+// ---------------------------------------------------------------------------
+enum class DlssSrPerfQuality : uint8_t {
+  kMaxPerf = 0,
+  kBalanced = 1,
+  kMaxQuality = 2,
+  kUltraPerformance = 3,
+};
+
+// ---------------------------------------------------------------------------
 // BackendResult
 //
 // An independent result type for the DLSS SR backend, orthogonal to
@@ -110,6 +130,13 @@ struct GuestOutputEnhancementConfig {
 
   // NVIDIA Optical Flow sub-switch (independent module; not a dependency of SR).
   bool optical_flow_enabled = false;
+
+  // DLSS SR quality preset (create-time parameter of the SDK feature). Only
+  // meaningful when super_sampling_enabled (and master_enabled). The preset is
+  // baked into CreateFeature, so changing it requires a backend rebuild.
+  // The default is kBalanced to match the backend's former hardcoded value, so
+  // enabling SR for the first time never triggers a rebuild.
+  DlssSrPerfQuality perf_quality = DlssSrPerfQuality::kBalanced;
 
   // Frame Generation sub-switch.
   bool frame_generation_enabled = false;

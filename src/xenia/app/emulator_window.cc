@@ -154,6 +154,24 @@ DEFINE_bool(
     "runtime is missing or initialization fails, it deterministically falls "
     "back to the original render path.",
     "Display");
+DEFINE_string(
+    dlss_sr_perf_quality, "balanced",
+    "DLSS Super Resolution quality preset. Only effective when dlss_sr_enabled "
+    "is true. Use: [maxperf, balanced, maxquality, ultraperformance, "
+    "ultraperformance]\n"
+    " maxperf:\n"
+    "  Fastest preset, lowest quality.\n"
+    " balanced (default):\n"
+    "  Balanced speed and quality.\n"
+    " maxquality:\n"
+    "  Highest quality of the standard presets.\n"
+    " ultraperformance:\n"
+    "  Extended fastest preset.\n"
+    "Changing the preset rebuilds the DLSS backend (CreateFeature is a GPU "
+    "command), which takes effect on the next frame. Unknown values (including "
+    "ultraquality, which the current DLSS runtime does not support) fall back "
+    "to balanced.",
+    "Display");
 // Dithering to 8bpc is enabled by default since the effect is minor, only
 // effects what can't be shown normally by host displays, and nothing is changed
 // by it for 8bpc source without resampling.
@@ -188,6 +206,22 @@ using namespace xe::gpu;
 
 constexpr std::string_view kRecentlyPlayedTitlesFilename = "recent.toml";
 constexpr std::string_view kBaseTitle = "Xenia-canary";
+
+// Display name of a DLSS SR quality preset for the ImGui slider label.
+// File-local: the UI layer never exposes the SDK enum (license isolation).
+static const char* GetDlssSrPerfQualityName(ui::DlssSrPerfQuality quality) {
+  switch (quality) {
+    case ui::DlssSrPerfQuality::kMaxPerf:
+      return "MaxPerf";
+    case ui::DlssSrPerfQuality::kBalanced:
+      return "Balanced";
+    case ui::DlssSrPerfQuality::kMaxQuality:
+      return "MaxQuality";
+    case ui::DlssSrPerfQuality::kUltraPerformance:
+      return "UltraPerformance";
+  }
+  return "Balanced";
+}
 
 EmulatorWindow::EmulatorWindow(Emulator* emulator,
                                ui::WindowedAppContext& app_context,
@@ -498,6 +532,28 @@ void EmulatorWindow::DisplayConfigDialog::OnDraw(ImGuiIO& io) {
         bool new_dlss_sr = new_enhancement_config.super_sampling_enabled;
         ImGui::Checkbox("Super Resolution", &new_dlss_sr);
         new_enhancement_config.super_sampling_enabled = new_dlss_sr;
+        // The quality slider is only drawn (and only changeable) while the SR
+        // sub-switch is on; when the sub-switch is off the value is retained
+        // as-is (same semantics as the sub-switch when the master is off).
+        if (new_enhancement_config.super_sampling_enabled) {
+          int new_dlss_quality = static_cast<int>(
+              new_enhancement_config.perf_quality);
+          ImGui::TextUnformatted(
+              "DLSS SR quality preset (lower is faster, higher is higher "
+              "quality; changing it rebuilds the DLSS backend):");
+          ImGui::SliderInt("##DLSSSrPerfQuality", &new_dlss_quality, 0, 3,
+                           GetDlssSrPerfQualityName(
+                               static_cast<ui::DlssSrPerfQuality>(
+                                   new_dlss_quality)),
+                           ImGuiSliderFlags_NoInput);
+          ImGui::SameLine();
+          if (ImGui::Button("Reset##ResetDLSSSrPerfQuality")) {
+            new_dlss_quality = static_cast<int>(
+                ui::DlssSrPerfQuality::kBalanced);
+          }
+          new_enhancement_config.perf_quality =
+              static_cast<ui::DlssSrPerfQuality>(new_dlss_quality);
+        }
       }
 #endif
 
@@ -650,6 +706,16 @@ void EmulatorWindow::DisplayConfigDialog::OnDraw(ImGuiIO& io) {
               new_enhancement_config.super_sampling_enabled) {
         OVERRIDE_bool(dlss_sr_enabled,
                       new_enhancement_config.super_sampling_enabled);
+      }
+      // Only persist the SR quality preset while the SR sub-switch is on (the
+      // slider is only drawn and changeable in that case).
+      if (new_enhancement_config.master_enabled &&
+          new_enhancement_config.super_sampling_enabled &&
+          cvars_enhancement_config.perf_quality !=
+              new_enhancement_config.perf_quality) {
+        OVERRIDE_string(dlss_sr_perf_quality,
+                        GetCvarValueForDlssSrPerfQuality(
+                            new_enhancement_config.perf_quality));
       }
     }
 #endif
@@ -1116,11 +1182,52 @@ EmulatorWindow::GetGuestOutputPaintConfigForCvars() {
   return paint_config;
 }
 
+const char* EmulatorWindow::GetCvarValueForDlssSrPerfQuality(
+    ui::DlssSrPerfQuality perf_quality) {
+  switch (perf_quality) {
+    case ui::DlssSrPerfQuality::kMaxPerf:
+      return "maxperf";
+    case ui::DlssSrPerfQuality::kBalanced:
+      return "balanced";
+    case ui::DlssSrPerfQuality::kMaxQuality:
+      return "maxquality";
+    case ui::DlssSrPerfQuality::kUltraPerformance:
+      return "ultraperformance";
+  }
+  return "balanced";
+}
+
+ui::DlssSrPerfQuality EmulatorWindow::GetDlssSrPerfQualityForCvarValue(
+    const std::string& cvar_value) {
+  if (cvar_value ==
+      GetCvarValueForDlssSrPerfQuality(ui::DlssSrPerfQuality::kMaxPerf)) {
+    return ui::DlssSrPerfQuality::kMaxPerf;
+  }
+  if (cvar_value ==
+      GetCvarValueForDlssSrPerfQuality(ui::DlssSrPerfQuality::kBalanced)) {
+    return ui::DlssSrPerfQuality::kBalanced;
+  }
+  if (cvar_value ==
+      GetCvarValueForDlssSrPerfQuality(ui::DlssSrPerfQuality::kMaxQuality)) {
+    return ui::DlssSrPerfQuality::kMaxQuality;
+  }
+  if (cvar_value ==
+      GetCvarValueForDlssSrPerfQuality(ui::DlssSrPerfQuality::kUltraPerformance)) {
+    return ui::DlssSrPerfQuality::kUltraPerformance;
+  }
+  // Unknown value: fall back to the default preset (never a bogus value).
+  // "ultraquality" is unknown here on purpose: the current DLSS runtime does
+  // not support it, so a saved value of that name maps to balanced.
+  return ui::DlssSrPerfQuality::kBalanced;
+}
+
 ui::GuestOutputEnhancementConfig
 EmulatorWindow::GetGuestOutputEnhancementConfigForCvars() {
   ui::GuestOutputEnhancementConfig enhancement_config;
   enhancement_config.master_enabled = cvars::dlss_enabled;
   enhancement_config.super_sampling_enabled = cvars::dlss_sr_enabled;
+  enhancement_config.perf_quality =
+      GetDlssSrPerfQualityForCvarValue(cvars::dlss_sr_perf_quality);
   // NVOF / Frame Generation / experimental neural rendering sub-switches are
   // not exposed in the UI yet (Phase 2+); keep them at their default-off.
   return enhancement_config;

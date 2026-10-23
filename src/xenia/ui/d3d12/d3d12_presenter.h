@@ -315,6 +315,12 @@ class D3D12Presenter final : public Presenter {
   // empty vector when the executable path cannot be determined.
   std::vector<std::wstring> GetDLSSRuntimeDirectories() const;
 
+  // Resolves the absolute path to the ngx-local.json config file, relative to
+  // the executable (runtime\config\ngx-local.json). Returns an empty string when
+  // the executable path cannot be determined (the backend then fails to load the
+  // config and falls back to the original path).
+  std::wstring GetDLSSConfigPath() const;
+
   const D3D12Provider& provider_;
 
   // Whether DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING is supported by DXGI (depends in
@@ -365,6 +371,10 @@ class D3D12Presenter final : public Presenter {
   // output (read-only). nullptr when SR has never been requested. The backend
   // never touches guest_output_resource_paint_refs.
   std::unique_ptr<IDLSSSuperSamplingBackend> dlss_sr_backend_;
+  // The quality preset baked into dlss_sr_backend_'s CreateFeature (255 = the
+  // backend was never created). The preset is a create-time parameter, so a
+  // change requires a rebuild (reset + lazy recreation on the next frame).
+  uint8_t dlss_sr_backend_perf_quality_ = 0xFF;
 
   // DLSS SR enhancement config. Writable only by the UI thread, read by the
   // paint thread (under guest_output_enhancement_config_mutex_). All switches

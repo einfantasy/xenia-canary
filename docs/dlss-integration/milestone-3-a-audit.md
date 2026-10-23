@@ -34,7 +34,7 @@ M2 已正式验收（接口骨架 + 纯函数 + 15 用例主机侧测试）。M3
 
 ### C.2 SDK 头文件证据（权威版本 DLSS-310.9.1）
 
-- **初始化** `nvsdk_ngx.h:247`：`NVSDK_NGX_D3D12_Init_with_ProjectID(const char* InProjectId, NVSDK_NGX_EngineType, const char* InEngineVersion, const wchar_t* InApplicationDataPath, ID3D12Device*, const NVSDK_NGX_FeatureCommonInfo*, NVSDK_NGX_Version)` — 运行时目录经 `NVSDK_NGX_FeatureCommonInfo.PathListInfo.Path` 传入；内部经 `NGXLoadLibrary` 加载 `nvngxruntime.dll`。
+- **初始化** `nvsdk_ngx.h:247`：`NVSDK_NGX_D3D12_Init_with_ProjectID(const char* InProjectId, NVSDK_NGX_EngineType, const char* InEngineVersion, const wchar_t* InApplicationDataPath, ID3D12Device*, const NVSDK_NGX_FeatureCommonInfo*, NVSDK_NGX_Version)` — 运行时目录经 `NVSDK_NGX_FeatureCommonInfo.PathListInfo.Path` 传入；内部经 `NGXLoadLibrary` 加载 `nvngx_dlss.dll`。
 - **参数块** `nvsdk_ngx.h:381/450`：`NVSDK_NGX_D3D12_AllocateParameters(NVSDK_NGX_Parameter**)` / `NVSDK_NGX_D3D12_DestroyParameters(NVSDK_NGX_Parameter*)`。
 - **关闭** `nvsdk_ngx.h:282`：`NVSDK_NGX_D3D12_Shutdown1(ID3D12Device*)`。
 - **特性创建** `nvsdk_ngx.h`：`NVSDK_NGX_D3D12_CreateFeature(ID3D12GraphicsCommandList*, NVSDK_NGX_Feature, const NVSDK_NGX_Parameter*, NVSDK_NGX_Handle**)` — **接受命令列表，特性创建是 GPU 命令**。
@@ -122,7 +122,7 @@ M2 已正式验收（接口骨架 + 纯函数 + 15 用例主机侧测试）。M3
 
 ## D. 环境限制
 
-- 当前 Hyper-V 环境**无 NVIDIA 驱动、无真实 GPU**。无法执行：`Init_with_ProjectID` 成功路径、`CreateFeature`/`EvaluateFeature` 的 GPU 执行、`nvngxruntime.dll` 真实加载、`NGXResourceAllocCallback` 真实分配、任何 DLSS 画质/性能评估。
+- 当前 Hyper-V 环境**无 NVIDIA 驱动、无真实 GPU**。无法执行：`Init_with_ProjectID` 成功路径、`CreateFeature`/`EvaluateFeature` 的 GPU 执行、`nvngx_dlss.dll` 真实加载、`NGXResourceAllocCallback` 真实分配、任何 DLSS 画质/性能评估。
 - 本任务仅完成静态核实（头文件、SDK 文档提取、Veyra 参考、Xenia 契约），未运行任何构建或测试。M3-B 的编译与主机侧 Mock 测试计划在 F 节列出。
 - 所有 GPU 相关项在实机验证前一律标记 `UNVERIFIED`。
 
@@ -146,7 +146,7 @@ M2 已正式验收（接口骨架 + 纯函数 + 15 用例主机侧测试）。M3
 - 静态分析（clang-tidy/MSVC `/W4`）确认无 SDK 头文件误用、无 `nvsdk_*` 泄漏进 `dlss/*` 之外。
 
 **2. RTX 4090 实机验证清单**：
-- 驱动安装后 `nvngxruntime.dll` 可被 `Init_with_ProjectID` 加载。
+- 驱动安装后 `nvngx_dlss.dll` 可被 `Init_with_ProjectID` 加载。
 - `GetFeatureRequirements` 报告 SR 支持。
 - `NGXResourceAllocCallback` 被 SDK 调用且资源分配成功。
 - `CreateFeature` 成功，`EvaluateFeature` 在 4090 上执行无 `FAIL_*`。

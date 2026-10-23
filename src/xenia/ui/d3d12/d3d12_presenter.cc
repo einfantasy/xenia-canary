@@ -132,6 +132,23 @@ std::vector<std::wstring> D3D12Presenter::GetDLSSRuntimeDirectories() const {
   return {runtime_root + L"\\experimental"};
 }
 
+std::wstring D3D12Presenter::GetDLSSConfigPath() const {
+  wchar_t exe_path[MAX_PATH];
+  if (!GetModuleFileNameW(nullptr, exe_path, MAX_PATH)) {
+    XELOGW("DLSS SR: could not determine the executable path; the DLSS config "
+           "path is unavailable (the backend will fail to load the config and "
+           "fall back to the original path).");
+    return {};
+  }
+  std::wstring exe_dir(exe_path);
+  const size_t slash = exe_dir.find_last_of(L"\\/");
+  if (slash == std::wstring::npos) {
+    return {};
+  }
+  exe_dir = exe_dir.substr(0, slash + 1);  // keep the trailing separator.
+  return exe_dir + L"runtime\\config\\ngx-local.json";
+}
+
 bool D3D12Presenter::CaptureGuestOutput(RawImage& image_out) {
   Microsoft::WRL::ComPtr<ID3D12Resource> guest_output_resource;
   {
@@ -810,11 +827,27 @@ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(
             // not bypassed). When the master switch is off this is never
             // reached, so no backend is created, no DLL is loaded, and no GPU
             // work is done.
+            const uint8_t requested_quality =
+                static_cast<uint8_t>(enhancement_config.perf_quality);
+            // The quality preset is baked into CreateFeature, so a change
+            // requires a full backend rebuild: the destructor runs ReleaseFeature
+            // + SDK Shutdown, and the backend is recreated below with the new
+            // preset. (The 1:1 bypass and size-change rebuilds use the same
+            // reset + lazy-recreation path.)
+            if (dlss_sr_backend_ &&
+                requested_quality != dlss_sr_backend_perf_quality_) {
+              XELOGI("DLSS SR: quality preset changed ({} -> {}); rebuilding "
+                     "the backend.",
+                    dlss_sr_backend_perf_quality_, requested_quality);
+              dlss_sr_backend_.reset();
+            }
             const bool backend_just_created = (!dlss_sr_backend_);
             if (!dlss_sr_backend_) {
               dlss_sr_backend_ =
                   std::make_unique<xe::ui::dlss::DLSSSuperSamplingBackend>(
-                  device, GetDLSSRuntimeDirectories());
+                  device, GetDLSSRuntimeDirectories(), GetDLSSConfigPath(),
+                  enhancement_config.perf_quality);
+              dlss_sr_backend_perf_quality_ = requested_quality;
             }
             DlssSrFrameParams frame_params{};  // jitter 0, no reset (M3-B).
             Presenter::GuestOutputPaintFlow fallback_flow;

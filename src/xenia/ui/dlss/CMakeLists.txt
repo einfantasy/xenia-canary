@@ -18,7 +18,12 @@ if(NOT DEFINED XENIA_DLSS_SDK_DIR)
   set(XENIA_DLSS_SDK_DIR "C:/SDKs/NVIDIA/DLSS/DLSS-310.9.1")
 endif()
 target_include_directories(xenia-dlss PRIVATE
-  "${XENIA_DLSS_SDK_DIR}/include")
+  "${XENIA_DLSS_SDK_DIR}/include"
+  # rapidjson (header-only, vendored in third_party) parses the ngx-local.json
+  # config. The global include is only third_party (which resolves to
+  # third_party/rapidjson/, not third_party/rapidjson/include/), so the
+  # include subdir must be added explicitly for this target.
+  "${PROJECT_SOURCE_DIR}/third_party/rapidjson/include")
 
 # The runtime DLLs (nvngxruntime.dll, nvngx_dlss.dll) are resolved at runtime
 # by D3D12Presenter::GetDLSSRuntimeDirectories (relative to the executable).
