@@ -827,10 +827,12 @@ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(
             // not bypassed). When the master switch is off this is never
             // reached, so no backend is created, no DLL is loaded, and no GPU
             // work is done.
-            // The quality preset is a create-time parameter passed to the
-            // backend on every frame; the backend detects a change and
-            // re-creates the feature internally (release + re-create), exactly
-            // like a size change. So no full backend rebuild is needed here.
+              // The quality preset AND the render preset are create-time
+              // parameters passed to the backend on every frame (via the
+              // enhancement config, read under the mutex above); the backend
+              // detects a change and re-creates the feature internally
+              // (release + re-create), exactly like a size change. So no full
+              // backend rebuild is needed here.
             const bool backend_just_created = (!dlss_sr_backend_);
             if (!dlss_sr_backend_) {
               dlss_sr_backend_ =

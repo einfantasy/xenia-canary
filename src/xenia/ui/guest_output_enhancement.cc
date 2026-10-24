@@ -57,7 +57,7 @@ BackendResult SelectOutputPath(const GuestOutputEnhancementConfig& config,
   BackendResult result =
       backend->TryProcess(command_list, guest_output_resource, output_width,
                           output_height, guest_output_properties, frame_params,
-                          config.perf_quality);
+                            config.perf_quality, config.render_preset);
 
   // 3. Success: the backend produced usable output. Use the backend path.
   if (result == BackendResult::kSuccess) {

@@ -272,6 +272,25 @@ const char* PerfQualityName(ui::DlssSrPerfQuality quality) {
   return "Invalid";
 }
 
+  // Display name of a render preset for the log lines. The mapping from the
+  // Xenia-side enum to the SDK parameter value is a plain cast (same numeric
+  // values, see nvsdk_ngx_defs.h:70-88); the name is only for logging.
+  const char* RenderPresetName(ui::DlssSrRenderPreset preset) {
+    switch (preset) {
+      case ui::DlssSrRenderPreset::kDefault:
+        return "Default";
+      case ui::DlssSrRenderPreset::kJ:
+        return "J";
+      case ui::DlssSrRenderPreset::kK:
+        return "K";
+      case ui::DlssSrRenderPreset::kL:
+        return "L";
+      case ui::DlssSrRenderPreset::kM:
+        return "M";
+    }
+    return "Invalid";
+  }
+
 }  // namespace
 
 DLSSSuperSamplingBackend::DLSSSuperSamplingBackend(
@@ -402,7 +421,7 @@ bool DLSSSuperSamplingBackend::LoadNgxConfig(std::string* project_id_out,
 BackendResult DLSSSuperSamplingBackend::Initialize(
     ID3D12GraphicsCommandList* command_list, uint32_t input_width,
     uint32_t input_height, uint32_t output_width, uint32_t output_height,
-    ui::DlssSrPerfQuality perf_quality) {
+      ui::DlssSrPerfQuality perf_quality, ui::DlssSrRenderPreset render_preset) {
   if (!device_ || !command_list) {
     if (!init_early_failure_logged_) {
       XELOGE("DLSS SR: Initialize called with a null device or command_list; "
@@ -425,6 +444,23 @@ BackendResult DLSSSuperSamplingBackend::Initialize(
     state_ = State::kUnavailable;
     return BackendResult::kInputContractFailed;
   }
+
+    // The render preset is also a create-time parameter (one value per quality
+    // mode). Only Default (=0, "do not send the hint") and the four current
+    // presets J/K/L/M (=10..13) are legal; 1..4 (A-D, removed), 5..6
+    // (E-F, deprecated), 7..9 (G-I, reserved) and 14..15 (N-O, reserved) are
+    // all unusable. An out-of-range value is an input contract failure: cache
+    // as unavailable (no retry) and never clamp or silently pass to the SDK.
+    const uint8_t render_preset_value = static_cast<uint8_t>(render_preset);
+    if (render_preset_value != 0 &&
+        (render_preset_value < 10 || render_preset_value > 13)) {
+      XELOGW("DLSS SR: invalid render preset {} (legal values are 0 and "
+             "10..13; the others are removed/deprecated/reserved in the SDK "
+             "header); caching the backend as unavailable.",
+             static_cast<int>(render_preset_value));
+      state_ = State::kUnavailable;
+      return BackendResult::kInputContractFailed;
+    }
 
   // Diagnostic (logging only): log the device's adapter LUID so that on the
   // test machine we can confirm the device sits on a real physical adapter
@@ -625,6 +661,40 @@ BackendResult DLSSSuperSamplingBackend::Initialize(
                         reinterpret_cast<unsigned long long>(
                             &NGXResourceReleaseCallback));
 
+    // Render preset hint (create-time, one value per quality mode). kDefault
+    // means "do not send the hint at all": identical to the current verified
+    // baseline (the SDK then resolves the mode's default preset). Only an
+    // explicit J/K/L/M value is sent, and only to the parameter of the quality
+    // mode this feature was created with.
+    if (render_preset != ui::DlssSrRenderPreset::kDefault) {
+      const char* render_preset_param = nullptr;
+      switch (perf_quality) {
+        case ui::DlssSrPerfQuality::kMaxPerf:
+          render_preset_param =
+              NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Performance;
+          break;
+        case ui::DlssSrPerfQuality::kBalanced:
+          render_preset_param =
+              NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Balanced;
+          break;
+        case ui::DlssSrPerfQuality::kMaxQuality:
+          render_preset_param =
+              NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Quality;
+          break;
+        case ui::DlssSrPerfQuality::kUltraPerformance:
+          render_preset_param =
+              NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_UltraPerformance;
+          break;
+      }
+      if (render_preset_param) {
+        NVSDK_NGX_Parameter_SetUI(
+            parameter_block_, render_preset_param,
+            static_cast<unsigned int>(render_preset));
+        XELOGD("DLSS SR: render preset hint {} sent for the {} quality mode.",
+               RenderPresetName(render_preset), PerfQualityName(perf_quality));
+      }
+    }
+
   // 4. Create the backend output texture (ALLOW_UNORDERED_ACCESS, UAV state).
   D3D12_RESOURCE_DESC output_desc{};
   output_desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
@@ -794,11 +864,12 @@ BackendResult DLSSSuperSamplingBackend::Initialize(
   output_width_ = output_width;
   output_height_ = output_height;
   created_perf_quality_ = perf_quality;
+    created_render_preset_ = render_preset;
   state_ = State::kAvailable;
-  XELOGI("DLSS SR: backend initialized (input={}x{}, output={}x{}, "
-         "PerfQuality={}).",
+    XELOGI("DLSS SR: backend initialized (input={}x{}, output={}x{}, "
+           "PerfQuality={}, RenderPreset={}).",
          input_width, input_height, output_width, output_height,
-         PerfQualityName(perf_quality));
+           PerfQualityName(perf_quality), RenderPresetName(render_preset));
   return BackendResult::kSuccess;
 }
 
@@ -807,7 +878,8 @@ BackendResult DLSSSuperSamplingBackend::TryProcess(
     uint32_t output_width, uint32_t output_height,
     const Presenter::GuestOutputProperties& guest_output_properties,
     const DlssSrFrameParams& frame_params,
-    ui::DlssSrPerfQuality requested_quality) {
+      ui::DlssSrPerfQuality requested_quality,
+      ui::DlssSrRenderPreset requested_render_preset) {
   // 0. Cached unavailable: do not retry the SDK.
   if (state_ == State::kUnavailable) {
     return BackendResult::kUnavailable;
@@ -844,21 +916,26 @@ BackendResult DLSSSuperSamplingBackend::TryProcess(
     return BackendResult::kInputContractFailed;
   }
 
-  // Lazy init / re-create on size or quality change.
+    // Lazy init / re-create on size, quality, or render-preset change.
   bool just_initialized = false;
   if (state_ == State::kNotInitialized ||
       input_width != input_width_ || input_height != input_height_ ||
       output_width != output_width_ || output_height != output_height_ ||
-      requested_quality != created_perf_quality_) {
+        requested_quality != created_perf_quality_ ||
+        requested_render_preset != created_render_preset_) {
     if (state_ == State::kAvailable) {
-      // Size or quality changed: release the feature and re-create.
+        // Size, quality, or render preset changed: release the feature and
+        // re-create. (The presenter has already waited for the previous
+        // frame's command list to complete, so the release is safe per the
+        // SDK's Feature Disposal section.)
       ReleaseFeature();
       output_texture_.Reset();
       state_ = State::kNotInitialized;
     }
     BackendResult init_result =
         Initialize(command_list, input_width, input_height, output_width,
-                   output_height, requested_quality);
+                     output_height, requested_quality,
+                     requested_render_preset);
     if (init_result != BackendResult::kSuccess) {
       return init_result;
     }

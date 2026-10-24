@@ -172,6 +172,28 @@ DEFINE_string(
     "ultraquality, which the current DLSS runtime does not support) fall back "
     "to balanced.",
     "Display");
+  DEFINE_string(
+      dlss_sr_render_preset, "default",
+      "DLSS Super Resolution render preset (the model hint, one value per "
+      "quality mode). Only effective when dlss_sr_enabled is true. Use: "
+      "[default, j, k, l, m]\n"
+      " default:\n"
+      "  Do not send the hint; the SDK uses each quality mode's default "
+      "preset (identical to the previous behavior).\n"
+      " j:\n"
+      "  Similar to k; slightly less ghosting at the cost of extra "
+      "flickering. k is generally recommended over j.\n"
+      " k:\n"
+      "  The default preset for DLAA/balanced/quality modes; best image "
+      "quality at a higher performance cost.\n"
+      " l:\n"
+      "  The default preset for ultra-performance mode.\n"
+      " m:\n"
+      "  The default preset for performance (maxperf) mode.\n"
+      "Changing the preset rebuilds the DLSS backend (CreateFeature is a GPU "
+      "command), which takes effect on the next frame. Unknown values fall "
+      "back to default.",
+      "Display");
 // Dithering to 8bpc is enabled by default since the effect is minor, only
 // effects what can't be shown normally by host displays, and nothing is changed
 // by it for 8bpc source without resampling.
@@ -222,6 +244,50 @@ static const char* GetDlssSrPerfQualityName(ui::DlssSrPerfQuality quality) {
   }
   return "Balanced";
 }
+
+  // Display name of a DLSS SR render preset for the ImGui slider label.
+  // File-local: the UI layer never exposes the SDK enum (license isolation).
+  static const char* GetDlssSrRenderPresetName(ui::DlssSrRenderPreset preset) {
+    switch (preset) {
+      case ui::DlssSrRenderPreset::kDefault:
+        return "Default";
+      case ui::DlssSrRenderPreset::kJ:
+        return "J";
+      case ui::DlssSrRenderPreset::kK:
+        return "K";
+      case ui::DlssSrRenderPreset::kL:
+        return "L";
+      case ui::DlssSrRenderPreset::kM:
+        return "M";
+    }
+    return "Default";
+  }
+
+  // The render-preset options in slider order (index 0 is the default). The
+  // enum values are the SDK header's explicit numeric values (0/10/11/12/13,
+  // non-contiguous), so the slider operates on an index into this table, not
+  // on the raw value.
+  static const ui::DlssSrRenderPreset kDlssSrRenderPresetOptions[] = {
+      ui::DlssSrRenderPreset::kDefault, ui::DlssSrRenderPreset::kJ,
+      ui::DlssSrRenderPreset::kK, ui::DlssSrRenderPreset::kL,
+      ui::DlssSrRenderPreset::kM};
+  static_assert(sizeof(kDlssSrRenderPresetOptions) /
+                    sizeof(kDlssSrRenderPresetOptions[0]) == 5,
+                "one option per render preset");
+
+  // Index into kDlssSrRenderPresetOptions for the given preset. A value that is
+  // not in the table (a stale or invalid config) maps to index 0 (kDefault).
+  static int DlssSrRenderPresetIndex(ui::DlssSrRenderPreset preset) {
+    const size_t option_count =
+        sizeof(kDlssSrRenderPresetOptions) /
+        sizeof(kDlssSrRenderPresetOptions[0]);
+    for (size_t i = 0; i < option_count; ++i) {
+      if (kDlssSrRenderPresetOptions[i] == preset) {
+        return static_cast<int>(i);
+      }
+    }
+    return 0;
+  }
 
 EmulatorWindow::EmulatorWindow(Emulator* emulator,
                                ui::WindowedAppContext& app_context,
@@ -553,6 +619,27 @@ void EmulatorWindow::DisplayConfigDialog::OnDraw(ImGuiIO& io) {
           }
           new_enhancement_config.perf_quality =
               static_cast<ui::DlssSrPerfQuality>(new_dlss_quality);
+
+            // The render-preset selector is only drawn (and only changeable)
+            // while the SR sub-switch is on (same semantics as the quality
+            // slider). Index into kDlssSrRenderPresetOptions (the enum values
+            // are non-contiguous, so the slider cannot use them directly).
+            int new_dlss_render_preset_index = DlssSrRenderPresetIndex(
+                new_enhancement_config.render_preset);
+            ImGui::TextUnformatted(
+                "DLSS SR render preset (per-quality-mode model hint; changing "
+                "it rebuilds the DLSS backend):");
+            ImGui::SliderInt(
+                "##DLSSSrRenderPreset", &new_dlss_render_preset_index, 0, 4,
+                GetDlssSrRenderPresetName(
+                    kDlssSrRenderPresetOptions[new_dlss_render_preset_index]),
+                ImGuiSliderFlags_NoInput);
+            ImGui::SameLine();
+            if (ImGui::Button("Reset##ResetDLSSSrRenderPreset")) {
+              new_dlss_render_preset_index = 0;  // kDefault.
+            }
+            new_enhancement_config.render_preset =
+                kDlssSrRenderPresetOptions[new_dlss_render_preset_index];
         }
       }
 #endif
@@ -717,6 +804,16 @@ void EmulatorWindow::DisplayConfigDialog::OnDraw(ImGuiIO& io) {
                         GetCvarValueForDlssSrPerfQuality(
                             new_enhancement_config.perf_quality));
       }
+        // Only persist the SR render preset while the SR sub-switch is on
+        // (the selector is only drawn and changeable in that case).
+        if (new_enhancement_config.master_enabled &&
+            new_enhancement_config.super_sampling_enabled &&
+            cvars_enhancement_config.render_preset !=
+                new_enhancement_config.render_preset) {
+          OVERRIDE_string(dlss_sr_render_preset,
+                          GetCvarValueForDlssSrRenderPreset(
+                              new_enhancement_config.render_preset));
+        }
     }
 #endif
 
@@ -1221,6 +1318,42 @@ ui::DlssSrPerfQuality EmulatorWindow::GetDlssSrPerfQualityForCvarValue(
   return ui::DlssSrPerfQuality::kBalanced;
 }
 
+  const char* EmulatorWindow::GetCvarValueForDlssSrRenderPreset(
+      ui::DlssSrRenderPreset render_preset) {
+    switch (render_preset) {
+      case ui::DlssSrRenderPreset::kDefault:
+        return "default";
+      case ui::DlssSrRenderPreset::kJ:
+        return "j";
+      case ui::DlssSrRenderPreset::kK:
+        return "k";
+      case ui::DlssSrRenderPreset::kL:
+        return "l";
+      case ui::DlssSrRenderPreset::kM:
+        return "m";
+    }
+    return "default";
+  }
+
+  ui::DlssSrRenderPreset EmulatorWindow::GetDlssSrRenderPresetForCvarValue(
+      const std::string& cvar_value) {
+    if (cvar_value == GetCvarValueForDlssSrRenderPreset(ui::DlssSrRenderPreset::kJ)) {
+      return ui::DlssSrRenderPreset::kJ;
+    }
+    if (cvar_value == GetCvarValueForDlssSrRenderPreset(ui::DlssSrRenderPreset::kK)) {
+      return ui::DlssSrRenderPreset::kK;
+    }
+    if (cvar_value == GetCvarValueForDlssSrRenderPreset(ui::DlssSrRenderPreset::kL)) {
+      return ui::DlssSrRenderPreset::kL;
+    }
+    if (cvar_value == GetCvarValueForDlssSrRenderPreset(ui::DlssSrRenderPreset::kM)) {
+      return ui::DlssSrRenderPreset::kM;
+    }
+    // Unknown value: fall back to kDefault (never send a bogus preset to the
+    // SDK). This is the behavior-neutral choice.
+    return ui::DlssSrRenderPreset::kDefault;
+  }
+
 ui::GuestOutputEnhancementConfig
 EmulatorWindow::GetGuestOutputEnhancementConfigForCvars() {
   ui::GuestOutputEnhancementConfig enhancement_config;
@@ -1228,6 +1361,8 @@ EmulatorWindow::GetGuestOutputEnhancementConfigForCvars() {
   enhancement_config.super_sampling_enabled = cvars::dlss_sr_enabled;
   enhancement_config.perf_quality =
       GetDlssSrPerfQualityForCvarValue(cvars::dlss_sr_perf_quality);
+    enhancement_config.render_preset =
+        GetDlssSrRenderPresetForCvarValue(cvars::dlss_sr_render_preset);
   // NVOF / Frame Generation / experimental neural rendering sub-switches are
   // not exposed in the UI yet (Phase 2+); keep them at their default-off.
   return enhancement_config;

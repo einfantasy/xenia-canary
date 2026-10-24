@@ -86,6 +86,11 @@ class DLSSSuperSamplingBackend final : public IDLSSSuperSamplingBackend {
   // baked into CreateFeature). The backend maps it to the SDK enum
   // NVSDK_NGX_PerfQuality_Value; an out-of-range value is an input contract
   // failure (deterministic fallback), never a silent clamp.
+  // The render preset is NOT passed to the constructor: it is a per-frame
+  // parameter of TryProcess (like perf_quality) and the backend defaults to
+  // kDefault (=0, "do not send the hint") until the first TryProcess. The
+  // first TryProcess always initializes, so no re-create is ever triggered by
+  // a constructor/preset mismatch.
   // The provider releases the adapter it used to create `device` (retaining it
   // makes the NVIDIA driver reject later CreateCommittedResource calls with
   // E_INVALIDARG). So the backend enumerates adapters itself in Initialize()
@@ -112,7 +117,8 @@ class DLSSSuperSamplingBackend final : public IDLSSSuperSamplingBackend {
       uint32_t output_height,
       const Presenter::GuestOutputProperties& guest_output_properties,
       const DlssSrFrameParams& frame_params,
-      ui::DlssSrPerfQuality perf_quality) override;
+        ui::DlssSrPerfQuality perf_quality,
+        ui::DlssSrRenderPreset render_preset) override;
 
   // Getters for the backend output. The presenter uses these to create the SRV
   // (in its view heap) and to know the output size. The output texture is owned
@@ -132,10 +138,16 @@ class DLSSSuperSamplingBackend final : public IDLSSSuperSamplingBackend {
   // quality preset is passed in (it is a create-time parameter); the backend
   // stores it as created_perf_quality_ on success so a later change is
   // detected as a re-create.
+    // The render preset is passed in too (also a create-time parameter, one
+    // value per quality mode); the backend stores it as created_render_preset_
+    // on success so a later change is detected as a re-create. kDefault (=0)
+    // means "do not send the hint at all". An out-of-range value (not 0 and not
+    // 10..13) is an input contract failure.
   BackendResult Initialize(ID3D12GraphicsCommandList* command_list,
                            uint32_t input_width, uint32_t input_height,
                            uint32_t output_width, uint32_t output_height,
-                           ui::DlssSrPerfQuality perf_quality);
+                             ui::DlssSrPerfQuality perf_quality,
+                             ui::DlssSrRenderPreset render_preset);
   // Ensures the ngx-local.json config exists at config_path_. If it is missing,
   // the parent directory is created and a default config (matching the former
   // hardcoded ProjectId/EngineVersion, so a missing config is behavior-neutral)
@@ -160,6 +172,16 @@ class DLSSSuperSamplingBackend final : public IDLSSSuperSamplingBackend {
   // per-frame TryProcess whose requested quality differs from this value
   // triggers a re-create (release + re-create), just like a size change.
   ui::DlssSrPerfQuality created_perf_quality_;
+
+    // The render preset the current feature was created with. Initialized to
+    // kDefault (the constructor does not take a render preset; the first
+    // TryProcess always initializes, so this value is only ever compared AFTER
+    // a successful Initialize). Updated by Initialize() on every (re-)creation.
+    // A per-frame TryProcess whose requested render preset differs from this
+    // value triggers a re-create (release + re-create), just like a quality
+    // change.
+    ui::DlssSrRenderPreset created_render_preset_ =
+        ui::DlssSrRenderPreset::kDefault;
 
   State state_ = State::kNotInitialized;
   // The backend's identity: input size x output size. Any change requires a

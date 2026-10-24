@@ -55,6 +55,34 @@ enum class DlssSrPerfQuality : uint8_t {
 };
 
 // ---------------------------------------------------------------------------
+// DlssSrRenderPreset
+//
+// Xenia-side subset of NVSDK_NGX_DLSS_Hint_Render_Preset (DLSS SDK 310.9.1,
+// nvsdk_ngx_defs.h:70-88). The values are the SDK header's EXPLICIT numeric
+// values (0/10/11/12/13), NOT a contiguous 0..4 ordering: the PDF's implicit
+// A..O letters occupy slots 1-15, and A-D (removed), E-F (deprecated), G-I
+// (reserved), and N-O (reserved) are all unusable. The UI/config layer never
+// includes any nvsdk_* header (license isolation: SDK dependencies are
+// confined to the dlss/* module); the backend maps this value to the SDK
+// parameter at feature creation. Only Default and the four current presets are
+// exposed:
+//   - kJ (=10): similar to K; slightly less ghosting at the cost of extra
+//     flickering. K is generally recommended over J.
+//   - kK (=11): default for DLAA/Balanced/Quality modes; best image quality.
+//   - kL (=12): default for Ultra Perf mode.
+//   - kM (=13): default for Perf mode.
+//   - kDefault (=0): "do not send the hint at all" - the SDK then resolves the
+//     mode's default preset (identical to the current verified baseline).
+// ---------------------------------------------------------------------------
+enum class DlssSrRenderPreset : uint8_t {
+  kDefault = 0,
+  kJ = 10,
+  kK = 11,
+  kL = 12,
+  kM = 13,
+};
+
+// ---------------------------------------------------------------------------
 // BackendResult
 //
 // An independent result type for the DLSS SR backend, orthogonal to
@@ -137,6 +165,14 @@ struct GuestOutputEnhancementConfig {
   // The default is kBalanced to match the backend's former hardcoded value, so
   // enabling SR for the first time never triggers a rebuild.
   DlssSrPerfQuality perf_quality = DlssSrPerfQuality::kBalanced;
+
+  // DLSS SR render preset (create-time parameter of the SDK feature, one value
+  // per quality mode). Only meaningful when super_sampling_enabled (and
+  // master_enabled). Like perf_quality it is baked into CreateFeature, so
+  // changing it requires a backend rebuild. kDefault (=0) means "do not send
+  // the hint at all" (the SDK resolves the mode's default preset), so the
+  // default is behavior-neutral versus the verified baseline.
+  DlssSrRenderPreset render_preset = DlssSrRenderPreset::kDefault;
 
   // Frame Generation sub-switch.
   bool frame_generation_enabled = false;
@@ -229,7 +265,14 @@ class IDLSSSuperSamplingBackend {
       uint32_t output_height,
       const Presenter::GuestOutputProperties& guest_output_properties,
       const DlssSrFrameParams& frame_params,
-      DlssSrPerfQuality perf_quality) = 0;
+      DlssSrPerfQuality perf_quality,
+      // `render_preset` is the DLSS SR render preset for this frame. Like
+      // `perf_quality` it is a create-time parameter (one value per quality
+      // mode), so a change from the preset the feature was created with
+      // triggers a backend re-create (release + re-create). kDefault (=0)
+      // means "do not send the hint" (the SDK resolves the mode's default
+      // preset).
+      DlssSrRenderPreset render_preset) = 0;
 
   // The backend's owned output texture, valid after a successful TryProcess
   // (the backend created it during initialization). The presenter uses these
